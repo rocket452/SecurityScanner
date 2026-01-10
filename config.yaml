@@ -1,0 +1,3 @@
+target_domain: "platacard.mx"
+output_file: "vuln_report.json"
+threads: 10  # Future enhancement
