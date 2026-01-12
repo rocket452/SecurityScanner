@@ -1,22 +1,26 @@
 FROM python:3.12-slim
 
-# Install Go for tools
-RUN apt-get update && apt-get install -y golang-go wget unzip && rm -rf /var/lib/apt/lists/*
+# Install system deps
+RUN apt-get update && apt-get install -y \
+    golang-go \
+    wget \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Subfinder
-RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
-    mv /root/go/bin/subfinder /usr/local/bin/
+# Subfinder via Go
+RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+    && mv /root/go/bin/subfinder /usr/local/bin/
 
-# Install Amass
-RUN wget https://github.com/owasp-amass/amass/releases/download/v4.2.0/amass_linux.zip && \
-    unzip amass_linux.zip && mv amass_linux_amd64/amass /usr/local/bin/ && \
-    rm -rf amass_linux.zip amass_linux_amd64
+# Amass via Go (latest v4+)
+RUN go install -v github.com/owasp-amass/amass/v4/...@master \
+    && mv /root/go/bin/amass /usr/local/bin/
 
-# Copy code
 WORKDIR /app
 COPY . /app
 
-# Python deps
 RUN pip install --no-cache-dir httpx pyyaml
+
+# Health check
+RUN subfinder --version && amass --version
 
 ENTRYPOINT ["python", "subfinder_amass_scanner.py"]
