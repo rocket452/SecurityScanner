@@ -3,91 +3,88 @@ import subprocess
 import sys
 import argparse
 import httpx
-import os
 import yaml
 
-def docker_available():
-    return subprocess.run(['docker', '--version'], capture_output=True).returncode == 0
-
 def run_subfinder(target):
-    try:
-        if docker_available():
-            cmd = ['docker', 'run', '--rm', 'projectdiscovery/subfinder:latest', '-d', target, '-silent']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    """Try local first, then Docker if available"""
+    cmds = [
+        ['subfinder', '-d', target, '-silent'],  # Local
+        ['docker', 'run', '--rm', 'projectdiscovery/subfinder:latest', '-d', target, '-silent']  # Docker fallback
+    ]
+    for cmd in cmds:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
             subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
             if subs:
-                print('Subfinder via Docker OK')
+                print(f'Subfinder OK ({cmd[0]}): {len(subs)} subs')
                 return subs
-        result = subprocess.run(['subfinder', '-d', target, '-silent'], capture_output=True, text=True, timeout=300)
-        return set(line.strip() for line in result.stdout.split('\n') if line.strip())
-    except Exception as e:
-        print(f'Subfinder failed (install or Docker): {e}')
-        return set()
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    print('Subfinder failed')
+    return set()
 
 def run_amass(target):
-    try:
-        if docker_available():
-            cmd = ['docker', 'run', '--rm', 'owaspamass/amass:latest', 'enum', '-passive', '-d', target, '-silent']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    """Try local first, then Docker"""
+    cmds = [
+        ['amass', 'enum', '-passive', '-d', target, '-silent'],  # Local
+        ['docker', 'run', '--rm', 'owaspamass/amass:latest', 'enum', '-passive', '-d', target, '-silent']  # Docker
+    ]
+    for cmd in cmds:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600)
             subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
             if subs:
-                print('Amass via Docker OK')
+                print(f'Amass OK ({cmd[0]}): {len(subs)} subs')
                 return subs
-        result = subprocess.run(['amass', 'enum', '-passive', '-d', target, '-silent'], capture_output=True, text=True, timeout=600)
-        return set(line.strip() for line in result.stdout.split('\n') if line.strip())
-    except Exception as e:
-        print(f'Amass failed (install or Docker): {e}')
-        return set()
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    print('Amass failed')
+    return set()
 
 def scan_vulnerabilities(url):
     vulns = []
     try:
+        # Your local scanners
         from admin_scanner import check_admin
         from backup_scanner import check_backup
         if check_admin(url):
-            vulns.append({'url': url, 'issue': 'Admin panel detected'})
+            vulns.append('Admin panel exposed')
         if check_backup(url):
-            vulns.append({'url': url, 'issue': 'Backup file exposed'})
-    except ImportError as e:
-        vulns.append({'url': url, 'issue': f'Scanner import error: {str(e)} - check file paths'})
-    except Exception as e:
-        vulns.append({'url': url, 'issue': f'Scan failed: {str(e)}'})
+            vulns.append('Backup file found')
+    except ImportError:
+        pass  # Graceful if not available
     return vulns
 
-def scan_subdomains(subdomains):
-    vulnerabilities = []
-    with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
+def probe_subdomains(subdomains):
+    live = []
+    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
         for sub in sorted(subdomains):
-            for protocol in ['https', 'http']:
+            for proto in ['https', 'http']:
                 try:
-                    full_url = f'{protocol}://{sub}'
-                    resp = client.get(full_url, follow_redirects=True)
-                    if 200 <= resp.status_code < 400:
-                        vulns = scan_vulnerabilities(full_url)
-                        vulnerabilities.extend(vulns)
-                        print(f'Live: {full_url} (Status: {resp.status_code})')
+                    resp = client.get(f'{proto}://{sub}')
+                    if resp.status_code == 200:
+                        live.append((f'{proto}://{sub}', scan_vulnerabilities(f'{proto}://{sub}')))
+                        print(f'✅ LIVE: {proto}://{sub} (200)')
                         break
                 except:
                     continue
-    return vulnerabilities
+    return live
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Subdomain/Vuln Scanner w/ Docker Fallback')
-    parser.add_argument('target', help='Target domain e.g. av7bible.com')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('target')
     args = parser.parse_args()
     
-    print(f'Scanning {args.target}...')
-    print('Subfinder:')
+    print(f'🔍 Scanning {args.target}')
     subs1 = run_subfinder(args.target)
-    print('Amass:')
     subs2 = run_amass(args.target)
     all_subs = subs1.union(subs2)
-    print(f'{len(all_subs)} unique subdomains: {sorted(all_subs)}')
+    print(f'Found {len(all_subs)} subs: {sorted(all_subs)}')
     
-    vulns = scan_subdomains(all_subs)
-    print('\nVULNERABILITIES:')
-    if vulns:
+    live_scans = probe_subdomains(all_subs)
+    print('\n🚨 VULNS:')
+    for url, vulns in live_scans:
         for v in vulns:
-            print(f'- {v["url"]}: {v["issue"]}')
-    else:
-        print('No vulnerabilities detected (add more scanners).')
+            print(f'  {url}: {v}')
+    if not live_scans:
+        print('No live hosts or vulns found')
