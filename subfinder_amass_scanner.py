@@ -60,6 +60,7 @@ def run_amass(target):
 def scan_vulnerabilities(url):
     vulns = []
     try:
+        # Basic scanners
         from admin_scanner import check_admin
         from backup_scanner import check_backup
         if check_admin(url):
@@ -68,13 +69,29 @@ def scan_vulnerabilities(url):
         if check_backup(url):
             vulns.append('Backup file found')
             log(f'BACKUP on {url}', 'VULN')
+        
+        # Nuclei scan
+        log(f'Running Nuclei on {url}', 'INFO')
+        result = subprocess.run(
+            ['nuclei', '-u', url, '-silent', '-nc', '-severity', 'critical,high,medium'],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.stdout.strip():
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    vulns.append(f'Nuclei: {line.strip()}')
+                    log(f'NUCLEI: {line.strip()}', 'VULN')
+    except subprocess.TimeoutExpired:
+        log('Nuclei timeout', 'WARN')
+    except FileNotFoundError:
+        log('Nuclei not installed', 'WARN')
     except Exception as e:
         log(f'Scanner error: {e}', 'WARN')
     return vulns
 
 def probe_subdomains(subdomains):
     live = []
-    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=10.0, follow_redirects=True, verify=False) as client:
         for sub in sorted(subdomains):
             for proto in ['https', 'http']:
                 try:
@@ -89,7 +106,7 @@ def probe_subdomains(subdomains):
     return live
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Security Scanner w/ Detailed Logs')
+    parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
     parser.add_argument('target', help='Target domain')
     args = parser.parse_args()
     
@@ -104,3 +121,6 @@ if __name__ == '__main__':
     for url, vulns in live_scans:
         for v in vulns:
             print(f'{url}: {v}')
+    
+    if not any(vulns for _, vulns in live_scans):
+        print('No vulnerabilities detected.')

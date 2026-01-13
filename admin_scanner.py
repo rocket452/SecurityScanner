@@ -3,6 +3,8 @@ import requests
 import urllib3
 import re
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 def check_admin(url):
     """Check for common admin panels/backdoors"""
     admin_paths = [
