@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import requests
+import urllib3
 import re
 
 def check_backup(url):
