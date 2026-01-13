@@ -18,7 +18,7 @@ RUN go install -v github.com/owasp-amass/amass/v4/...@master \
 WORKDIR /app
 COPY . /app
 
-RUN pip install --no-cache-dir httpx pyyaml
+RUN pip install --no-cache-dir httpx pyyaml requests
 
 # Health check
 RUN subfinder --version && amass --version
