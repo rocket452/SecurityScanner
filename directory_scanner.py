@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import subprocess
 import urllib.parse
+import re
 
 def log(msg, level='INFO'):
     print(f'[{level}] {msg}')
@@ -12,7 +13,7 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120):
     """
     discovered = []
     try:
-        # ffuf command: -u URL/FUZZ -w wordlist -mc all -fc 404 -t 40 -timeout 3 -s (silent)
+        # ffuf command: -u URL/FUZZ -w wordlist -mc all -fc 404 -t 40 -timeout 3 -ac (auto-calibration)
         log(f'Running ffuf with {wordlist} against {url}', 'DEBUG')
         result = subprocess.run([
             'ffuf',
@@ -21,25 +22,25 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120):
             '-mc', 'all',  # Match all status codes
             '-fc', '404',  # Filter out 404s
             '-t', '40',    # 40 threads for faster scanning
-            '-timeout', '3'
+            '-timeout', '3',
+            '-ac'          # Auto-calibration to filter default responses
         ], capture_output=True, text=True, timeout=timeout)
         
         log(f'ffuf exit code: {result.returncode}', 'DEBUG')
         if result.stderr:
             log(f'ffuf stderr: {result.stderr[:200]}', 'WARN')
         
-        # Parse ffuf output - format: [Status: XXX] [Size: YYY] path
+        # Parse ffuf output - format: path [Status: XXX, Size: YYY, ...]
         lines = result.stdout.strip().split('\n')
         log(f'ffuf output lines: {len(lines)}', 'DEBUG')
         
         for line in lines:
-            if line.strip() and '[Status:' in line:
-                parts = line.split(']')
-                if len(parts) >= 3:
-                    status = parts[0].replace('[Status:', '').strip()
-                    path = parts[-1].strip()
-                    if path:
-                        discovered.append((path, status))
+            # Use regex to extract path and status from lines like: admin [Status: 403, Size: ...]
+            m = re.match(r'^(\S+)\s+\[Status:\s*(\d+),', line.strip())
+            if m:
+                path = m.group(1)
+                status = m.group(2)
+                discovered.append((path, status))
         
         log(f'Parsed {len(discovered)} paths from ffuf output', 'DEBUG')
         return discovered
