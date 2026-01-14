@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y \
     golang-go \
     wget \
     unzip \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Subfinder via Go
@@ -20,12 +21,19 @@ RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
     && mv /root/go/bin/nuclei /usr/local/bin/ \
     && nuclei -update-templates -silent
 
+# ffuf for directory fuzzing
+RUN go install -v github.com/ffuf/ffuf/v2@latest \
+    && mv /root/go/bin/ffuf /usr/local/bin/
+
+# Download common directory wordlist
+RUN wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -O /app/common.txt
+
 WORKDIR /app
 COPY . /app
 
 RUN pip install --no-cache-dir httpx pyyaml requests
 
 # Health check
-RUN subfinder --version && amass --version && nuclei -version
+RUN subfinder --version && amass --version && nuclei -version && ffuf -V
 
 ENTRYPOINT ["python", "subfinder_amass_scanner.py"]

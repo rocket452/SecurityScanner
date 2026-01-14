@@ -70,6 +70,16 @@ def scan_vulnerabilities(url):
             vulns.append('Backup file found')
             log(f'BACKUP on {url}', 'VULN')
         
+        # Directory fuzzing
+        log(f'Fuzzing directories on {url}', 'INFO')
+        from directory_scanner import fuzz_directories
+        discovered = fuzz_directories(url, timeout=60)
+        if discovered:
+            log(f'Discovered {len(discovered)} paths via fuzzing', 'OK')
+            for path, status in discovered[:10]:  # Limit output to top 10
+                vulns.append(f'Discovered path: /{path} [{status}]')
+                log(f'FUZZ: /{path} [{status}]', 'VULN')
+        
         # Nuclei scan
         log(f'Running Nuclei on {url}', 'INFO')
         result = subprocess.run(
