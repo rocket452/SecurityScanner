@@ -21,8 +21,7 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120):
             '-mc', 'all',  # Match all status codes
             '-fc', '404',  # Filter out 404s
             '-t', '40',    # 40 threads for faster scanning
-            '-timeout', '3',
-            '-s'           # Silent mode
+            '-timeout', '3'
         ], capture_output=True, text=True, timeout=timeout)
         
         log(f'ffuf exit code: {result.returncode}', 'DEBUG')
