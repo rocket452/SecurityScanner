@@ -96,13 +96,16 @@ def probe_subdomains(subdomains):
             for proto in ['https', 'http']:
                 try:
                     resp = client.get(f'{proto}://{sub}')
-                    if resp.status_code == 200:
+                    # Accept any 2xx or 3xx status code
+                    if 200 <= resp.status_code < 400:
                         vulns = scan_vulnerabilities(f'{proto}://{sub}')
                         live.append((f'{proto}://{sub}', vulns))
-                        print(f'✅ {proto}://{sub} (200)')
+                        print(f'✅ {proto}://{sub} ({resp.status_code})')
                         break
-                except:
-                    pass
+                    else:
+                        log(f'{proto}://{sub} returned {resp.status_code}', 'DEBUG')
+                except Exception as e:
+                    log(f'{proto}://{sub} unreachable: {str(e)[:50]}', 'DEBUG')
     return live
 
 if __name__ == '__main__':
