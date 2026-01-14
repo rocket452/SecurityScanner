@@ -73,18 +73,20 @@ def scan_vulnerabilities(url):
         # Directory fuzzing
         log(f'Fuzzing directories on {url}', 'INFO')
         from directory_scanner import fuzz_directories
-        discovered = fuzz_directories(url, timeout=60)
+        discovered = fuzz_directories(url, timeout=120)
         if discovered:
             log(f'Discovered {len(discovered)} paths via fuzzing', 'OK')
             for path, status in discovered[:10]:  # Limit output to top 10
                 vulns.append(f'Discovered path: /{path} [{status}]')
                 log(f'FUZZ: /{path} [{status}]', 'VULN')
+        else:
+            log('No paths discovered via fuzzing', 'INFO')
         
-        # Nuclei scan
+        # Nuclei scan (increased timeout)
         log(f'Running Nuclei on {url}', 'INFO')
         result = subprocess.run(
             ['nuclei', '-u', url, '-silent', '-nc', '-severity', 'critical,high,medium'],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=180
         )
         if result.stdout.strip():
             for line in result.stdout.strip().split('\n'):
