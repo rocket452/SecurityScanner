@@ -114,7 +114,12 @@ if __name__ == '__main__':
     subs1 = run_subfinder(args.target)
     subs2 = run_amass(args.target)
     all_subs = subs1.union(subs2)
-    print(f'{len(all_subs)} subs: {sorted(all_subs)}')
+    
+    # Always include base domain in scan
+    all_subs.add(args.target)
+    log(f'Including base domain in scan: {args.target}', 'INFO')
+    
+    print(f'{len(all_subs)} targets: {sorted(all_subs)}')
     
     live_scans = probe_subdomains(all_subs)
     print('\n🚨 VULNERABILITIES:')
