@@ -25,10 +25,10 @@ RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
 RUN go install -v github.com/ffuf/ffuf/v2@latest \
     && mv /root/go/bin/ffuf /usr/local/bin/
 
-# Download common directory wordlist
+# Create app directory and download wordlist
+WORKDIR /app
 RUN wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -O /app/common.txt
 
-WORKDIR /app
 COPY . /app
 
 RUN pip install --no-cache-dir httpx pyyaml requests
