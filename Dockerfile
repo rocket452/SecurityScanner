@@ -25,9 +25,9 @@ RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
 RUN go install -v github.com/ffuf/ffuf/v2@latest \
     && mv /root/go/bin/ffuf /usr/local/bin/
 
-# Create app directory and download wordlist
+# Create app directory and download raft-medium wordlist (~30k paths)
 WORKDIR /app
-RUN wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -O /app/common.txt
+RUN wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-medium-directories.txt -O /app/wordlist.txt
 
 COPY . /app
 

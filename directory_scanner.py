@@ -2,22 +2,22 @@
 import subprocess
 import urllib.parse
 
-def fuzz_directories(url, wordlist='/app/common.txt', timeout=60):
+def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120):
     """
     Use ffuf to discover hidden directories and files
     Returns list of discovered paths with status codes
     """
     discovered = []
     try:
-        # ffuf command: -u URL/FUZZ -w wordlist -mc all -fc 404 -t 20 -timeout 5 -s (silent)
+        # ffuf command: -u URL/FUZZ -w wordlist -mc all -fc 404 -t 40 -timeout 3 -s (silent)
         result = subprocess.run([
             'ffuf',
             '-u', f'{url.rstrip("/")}/FUZZ',
             '-w', wordlist,
             '-mc', 'all',  # Match all status codes
             '-fc', '404',  # Filter out 404s
-            '-t', '20',    # 20 threads
-            '-timeout', '5',
+            '-t', '40',    # 40 threads for faster scanning
+            '-timeout', '3',
             '-s'           # Silent mode
         ], capture_output=True, text=True, timeout=timeout)
         
