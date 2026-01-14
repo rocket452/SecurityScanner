@@ -96,8 +96,8 @@ def probe_subdomains(subdomains):
             for proto in ['https', 'http']:
                 try:
                     resp = client.get(f'{proto}://{sub}')
-                    # Accept any 2xx or 3xx status code
-                    if 200 <= resp.status_code < 400:
+                    # Accept any 2xx, 3xx, or 4xx status code (scan reachable hosts even if blocked)
+                    if 200 <= resp.status_code < 500:
                         vulns = scan_vulnerabilities(f'{proto}://{sub}')
                         live.append((f'{proto}://{sub}', vulns))
                         print(f'✅ {proto}://{sub} ({resp.status_code})')
