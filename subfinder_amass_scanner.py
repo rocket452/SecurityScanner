@@ -6,6 +6,50 @@ import httpx
 import yaml
 
 # ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def main():
+    """
+    Main entry point for the security scanner.
+    """
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
+    parser.add_argument('target', help='Target domain')
+    args = parser.parse_args()
+    
+    target_url = args.target
+    
+    # Print header
+    print(f'\n🔍 {target_url}')
+    print('=' * 60)
+    
+    # Initialize an empty list for subdomains
+    sub_domains = []
+    
+    # Add domains from Subfinder
+    sub_domains.extend(retrieve_sub_domains_from_subfinder(target_url))
+    
+    # Add domains from Amass
+    sub_domains.extend(retrieve_sub_domains_from_amass(target_url))
+    
+    # Always include the base domain
+    sub_domains.append(target_url)
+    log(f'Including base domain in scan: {target_url}', 'INFO')
+    
+    # Deduplicate the domains
+    sub_domains = deduplicate_domains(sub_domains)
+    
+    # Print summary of domains to scan
+    print_scan_summary(sub_domains, target_url)
+    
+    # Scan domains for vulnerabilities
+    scan_results = scan_domains_for_vulnerabilities(sub_domains)
+    
+    # Print vulnerability report
+    print_vulnerability_report(scan_results)
+
+# ============================================================================
 # LOGGING UTILITIES
 # ============================================================================
 
@@ -20,7 +64,6 @@ def log(msg, level='INFO'):
 def retrieve_sub_domains_from_subfinder(target):
     """
     Use Subfinder to discover subdomains for the target domain.
-    Returns a list of discovered subdomains.
     """
     log(f'Subfinder on {target}')
     cmd = ['subfinder', '-d', target, '-silent']
@@ -55,7 +98,6 @@ def retrieve_sub_domains_from_subfinder(target):
 def retrieve_sub_domains_from_amass(target):
     """
     Use Amass to discover subdomains for the target domain.
-    Returns a list of discovered subdomains.
     """
     log(f'Amass on {target}')
     cmd = ['amass', 'enum', '-passive', '-d', target, '-silent']
@@ -102,7 +144,6 @@ def deduplicate_domains(domains):
 def scan_single_domain_for_vulnerabilities(url):
     """
     Perform comprehensive vulnerability scanning on a single URL.
-    Returns a list of vulnerabilities found.
     """
     vulns = []
     
@@ -146,12 +187,11 @@ def scan_single_domain_for_vulnerabilities(url):
             log(f'Discovered {len(discovered)} total paths via recursive fuzzing', 'OK')
             for path, status in discovered:
                 vulns.append(f'Discovered path: /{path} [{status}]')
-                # Only log first 20 to avoid spam
                 if len([v for v in vulns if 'Discovered path' in v]) <= 20:
                     log(f'FUZZ: /{path} [{status}]', 'VULN')
             
             if len(discovered) > 20:
-                log(f'... and {len(discovered) - 20} more paths (check report for full list)', 'INFO')
+                log(f'... and {len(discovered) - 20} more paths', 'INFO')
         else:
             log('No paths discovered via recursive fuzzing', 'INFO')
         
@@ -180,7 +220,6 @@ def scan_single_domain_for_vulnerabilities(url):
 def probe_live_domains(domains):
     """
     Test which domains are live and accessible via HTTP/HTTPS.
-    Returns a list of tuples: (url, is_live, status_code)
     """
     live_domains = []
     
@@ -191,13 +230,10 @@ def probe_live_domains(domains):
                     url = f'{proto}://{domain}'
                     resp = client.get(url)
                     
-                    # Accept any 2xx, 3xx, or 4xx status code (scan reachable hosts even if blocked)
                     if 200 <= resp.status_code < 500:
                         live_domains.append((url, True, resp.status_code))
                         print(f'✅ {url} ({resp.status_code})')
                         break
-                    else:
-                        log(f'{url} returned {resp.status_code}', 'DEBUG')
                         
                 except Exception as e:
                     log(f'{url} unreachable: {str(e)[:50]}', 'DEBUG')
@@ -207,13 +243,8 @@ def probe_live_domains(domains):
 def scan_domains_for_vulnerabilities(domains):
     """
     Main vulnerability scanning function.
-    Probes domains for liveness, then scans live domains for vulnerabilities.
-    Returns a list of tuples: (url, vulnerabilities)
     """
-    # Probe which domains are live
     live_domains = probe_live_domains(domains)
-    
-    # Scan each live domain for vulnerabilities
     scan_results = []
     for url, is_live, status_code in live_domains:
         if is_live:
@@ -227,11 +258,8 @@ def scan_domains_for_vulnerabilities(domains):
 # ============================================================================
 
 def print_vulnerability_report(scan_results):
-    """
-    Print the final vulnerability report.
-    """
+    """Print the final vulnerability report."""
     print('\n🚨 VULNERABILITIES:')
-    
     has_vulns = False
     for url, vulns in scan_results:
         if vulns:
@@ -243,9 +271,7 @@ def print_vulnerability_report(scan_results):
         print('No vulnerabilities detected.')
 
 def print_scan_summary(domains, target):
-    """
-    Print a summary of domains to be scanned.
-    """
+    """Print a summary of domains to be scanned."""
     print('\n' + '=' * 60)
     print(f'📊 SUMMARY: {len(domains)} total target(s) to scan')
     print('=' * 60)
@@ -254,48 +280,9 @@ def print_scan_summary(domains, target):
     print('=' * 60 + '\n')
 
 # ============================================================================
-# MAIN EXECUTION
+# BOOTSTRAP
 # ============================================================================
 
-def main():
-    """
-    Main entry point for the security scanner.
-    """
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
-    parser.add_argument('target', help='Target domain')
-    args = parser.parse_args()
-    
-    target_url = args.target
-    
-    # Print header
-    print(f'\n🔍 {target_url}')
-    print('=' * 60)
-    
-    # Initialize an empty list for subdomains
-    sub_domains = []
-    
-    # Add domains from Subfinder
-    sub_domains.extend(retrieve_sub_domains_from_subfinder(target_url))
-    
-    # Add domains from Amass
-    sub_domains.extend(retrieve_sub_domains_from_amass(target_url))
-    
-    # Always include the base domain
-    sub_domains.append(target_url)
-    log(f'Including base domain in scan: {target_url}', 'INFO')
-    
-    # Deduplicate the domains
-    sub_domains = deduplicate_domains(sub_domains)
-    
-    # Print summary of domains to scan
-    print_scan_summary(sub_domains, target_url)
-    
-    # Scan domains for vulnerabilities
-    scan_results = scan_domains_for_vulnerabilities(sub_domains)
-    
-    # Print vulnerability report
-    print_vulnerability_report(scan_results)
-
 if __name__ == '__main__':
+    # This must remain at the bottom to ensure all functions are defined
     main()
