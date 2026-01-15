@@ -3,6 +3,25 @@ import subprocess
 import urllib.parse
 import re
 import httpx
+import yaml
+import time
+
+# Load configuration
+def load_config():
+    try:
+        with open('config.yaml', 'r') as f:
+            return yaml.safe_load(f)
+    except:
+        # Return defaults if config file not found
+        return {
+            'rate_limiting': {
+                'ffuf_threads': 20,
+                'http_timeout': 10,
+                'request_delay': 0
+            }
+        }
+
+CONFIG = load_config()
 
 def log(msg, level='INFO'):
     print(f'[{level}] {msg}')
@@ -38,10 +57,17 @@ def check_exposed_buckets(url):
     
     log(f'Checking for exposed buckets/storage on {url}', 'INFO')
     
+    timeout = CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
+    request_delay = CONFIG.get('rate_limiting', {}).get('request_delay', 0) / 1000.0  # Convert ms to seconds
+    
     try:
-        with httpx.Client(timeout=10.0, follow_redirects=True, verify=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
             for pattern in bucket_patterns:
                 try:
+                    # Add delay between requests if configured
+                    if request_delay > 0:
+                        time.sleep(request_delay)
+                    
                     test_url = f'{url.rstrip("/")}{pattern}'
                     resp = client.get(test_url)
                     
@@ -99,15 +125,18 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
     depth_prefix = '  ' * current_depth
     log(f'{depth_prefix}Fuzzing at depth {current_depth}: {url}', 'INFO')
     
+    # Get thread count from config
+    ffuf_threads = CONFIG.get('rate_limiting', {}).get('ffuf_threads', 20)
+    
     try:
-        # Run ffuf on current level
+        # Run ffuf on current level with configurable thread count
         result = subprocess.run([
             'ffuf',
             '-u', f'{url.rstrip("/")}/FUZZ',
             '-w', wordlist,
             '-mc', '200,201,202,203,204,301,302,307,308,401,403',
             '-fc', '404',
-            '-t', '50',
+            '-t', str(ffuf_threads),  # Use configured thread count
             '-timeout', '3',
             '-v',
             '-s'
@@ -175,6 +204,9 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=T
     """
     if recursive:
         log(f'Starting recursive directory fuzzing (max depth: {max_depth})', 'INFO')
+        ffuf_threads = CONFIG.get('rate_limiting', {}).get('ffuf_threads', 20)
+        log(f'Using {ffuf_threads} threads for ffuf', 'INFO')
+        
         discovered = fuzz_directories_recursive(url, wordlist, timeout, max_depth, current_depth=0)
         
         if discovered:
@@ -186,6 +218,7 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=T
     else:
         # Original single-level fuzzing
         log(f'Running single-level ffuf against {url}', 'INFO')
+        ffuf_threads = CONFIG.get('rate_limiting', {}).get('ffuf_threads', 20)
         discovered = []
         try:
             result = subprocess.run([
@@ -194,7 +227,7 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=T
                 '-w', wordlist,
                 '-mc', '200,201,202,203,204,301,302,307,308,401,403',
                 '-fc', '404',
-                '-t', '40',
+                '-t', str(ffuf_threads),
                 '-timeout', '3',
                 '-v',
                 '-s'
