@@ -70,6 +70,22 @@ def scan_vulnerabilities(url):
             vulns.append('Backup file found')
             log(f'BACKUP on {url}', 'VULN')
         
+        # Check for exposed buckets/storage first
+        log(f'Checking for exposed buckets/storage on {url}', 'INFO')
+        from directory_scanner import check_exposed_buckets
+        bucket_results = check_exposed_buckets(url)
+        if bucket_results:
+            for path, status, vuln_type in bucket_results:
+                if vuln_type == 'DIRECTORY_LISTING':
+                    vulns.append(f'Exposed directory listing: {path} [{status}]')
+                    log(f'BUCKET EXPOSED: {path} [{status}] - {vuln_type}', 'VULN')
+                elif vuln_type == 'ACCESSIBLE':
+                    vulns.append(f'Accessible path: {path} [{status}]')
+                    log(f'ACCESSIBLE PATH: {path} [{status}]', 'VULN')
+                elif vuln_type == 'FORBIDDEN_BUT_EXISTS':
+                    vulns.append(f'Path exists (forbidden): {path} [{status}]')
+                    log(f'PATH EXISTS: {path} [{status}]', 'INFO')
+        
         # Directory fuzzing
         log(f'Fuzzing directories on {url}', 'INFO')
         from directory_scanner import fuzz_directories
