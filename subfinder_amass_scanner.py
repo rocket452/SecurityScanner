@@ -5,6 +5,23 @@ import argparse
 import httpx
 import yaml
 
+# Load configuration
+def load_config():
+    try:
+        with open('config.yaml', 'r') as f:
+            return yaml.safe_load(f)
+    except:
+        # Return defaults if config file not found
+        return {
+            'rate_limiting': {
+                'nuclei_rate_limit': 150,
+                'nuclei_concurrency': 25,
+                'http_timeout': 10
+            }
+        }
+
+CONFIG = load_config()
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -23,6 +40,12 @@ def main():
     # Print header
     print(f'\n🔍 {target_url}')
     print('=' * 60)
+    
+    # Log rate limiting settings
+    rate_limits = CONFIG.get('rate_limiting', {})
+    log(f'Rate limiting: ffuf={rate_limits.get("ffuf_threads", 20)} threads, '
+        f'nuclei={rate_limits.get("nuclei_rate_limit", 150)}/min, '
+        f'concurrency={rate_limits.get("nuclei_concurrency", 25)}', 'INFO')
     
     # Initialize an empty list for subdomains
     sub_domains = []
@@ -203,12 +226,22 @@ def scan_single_domain_for_vulnerabilities(url):
         else:
             log('No paths discovered via recursive fuzzing', 'INFO')
         
-        # Nuclei vulnerability scanning
+        # Nuclei vulnerability scanning with rate limiting
         log(f'Running Nuclei on {url}', 'INFO')
-        result = subprocess.run(
-            ['nuclei', '-u', url, '-silent', '-nc', '-severity', 'critical,high,medium'],
-            capture_output=True, text=True, timeout=180
-        )
+        
+        # Get rate limiting settings from config
+        nuclei_rate_limit = CONFIG.get('rate_limiting', {}).get('nuclei_rate_limit', 150)
+        nuclei_concurrency = CONFIG.get('rate_limiting', {}).get('nuclei_concurrency', 25)
+        
+        result = subprocess.run([
+            'nuclei',
+            '-u', url,
+            '-silent',
+            '-nc',  # No color
+            '-severity', 'critical,high,medium',
+            '-rate-limit', str(nuclei_rate_limit),  # Requests per minute
+            '-c', str(nuclei_concurrency)  # Concurrent templates
+        ], capture_output=True, text=True, timeout=180)
         
         if result.stdout.strip():
             for line in result.stdout.strip().split('\n'):
@@ -230,8 +263,9 @@ def probe_live_domains(domains):
     Test which domains are live and accessible via HTTP/HTTPS.
     """
     live_domains = []
+    timeout = CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
     
-    with httpx.Client(timeout=10.0, follow_redirects=True, verify=False) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
         for domain in sorted(domains):
             for proto in ['https', 'http']:
                 try:
