@@ -1,7 +1,38 @@
 # SecurityScanner Configuration
 target_domain: "platacard.mx"
 output_file: "vuln_report.json"
-threads: 10  # Future enhancement
+
+# ==============================================================================
+# RATE LIMITING & PERFORMANCE SETTINGS
+# ==============================================================================
+# Adjust these values to control scan speed and avoid rate limiting/blocking
+# Lower values = slower but stealthier, Higher values = faster but more aggressive
+
+rate_limiting:
+  # ffuf (directory fuzzing) thread count
+  # Default: 20 (conservative)
+  # Range: 5 (very slow/stealthy) to 100 (fast/aggressive)
+  ffuf_threads: 20
+  
+  # Nuclei rate limit (requests per minute)
+  # Default: 150 (moderate)
+  # Range: 10 (very slow) to 500 (fast)
+  nuclei_rate_limit: 150
+  
+  # Nuclei concurrency (parallel templates)
+  # Default: 25 (moderate)
+  # Range: 5 (slow) to 100 (fast)
+  nuclei_concurrency: 25
+  
+  # HTTP request timeout (seconds)
+  # Default: 10
+  # Range: 5 (fast sites) to 30 (slow sites)
+  http_timeout: 10
+  
+  # Delay between requests (milliseconds)
+  # Default: 0 (no delay)
+  # Use 100-500ms for stealthy scanning
+  request_delay: 0
 
 # ==============================================================================
 # API KEYS FOR ENHANCED SUBDOMAIN DISCOVERY
