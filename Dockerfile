@@ -31,9 +31,9 @@ RUN wget -q https://raw.githubusercontent.com/danielmiessler/SecLists/master/Dis
 
 COPY . /app
 
-RUN pip install --no-cache-dir httpx pyyaml requests
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Health check
 RUN subfinder --version && amass --version && nuclei -version && ffuf -V
 
-ENTRYPOINT ["python", "subfinder_amass_scanner.py"]
+ENTRYPOINT ["python", "scanner.py"]

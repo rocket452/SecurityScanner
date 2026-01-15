@@ -51,17 +51,17 @@ Automated security reconnaissance tool combining **subdomain enumeration**, **re
 ```bash
 git clone https://github.com/rocket452/SecurityScanner.git
 cd SecurityScanner
-git checkout nuclei
-docker build -t security-nuclei .
+git checkout cleanupProcess
+docker build -t security-scanner .
 ```
 
 ### Run a Scan
 ```bash
 # Basic scan
-docker run -it security-nuclei example.com
+docker run -it security-scanner example.com
 
 # Scan specific target
-docker run -it security-nuclei prime.platacard.mx
+docker run -it security-scanner prime.platacard.mx
 ```
 
 ### Example Output
@@ -106,19 +106,49 @@ go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 go install -v github.com/ffuf/ffuf/v2@latest
 
 # Install Python dependencies
-pip install httpx pyyaml requests
+pip install -r requirements.txt
 ```
 
 ### Run Locally
 ```bash
-python subfinder_amass_scanner.py example.com
+python scanner.py example.com
 ```
 
 ## ⚙️ Configuration
 
+### Rate Limiting & Performance
+
+Edit `config.yaml` to customize scan behavior:
+```yaml
+rate_limiting:
+  ffuf_threads: 20              # Directory fuzzing threads (5-100)
+  nuclei_rate_limit: 150        # Nuclei requests per minute
+  nuclei_concurrency: 25        # Parallel Nuclei templates
+  http_timeout: 10              # Request timeout in seconds
+  request_delay: 0              # Delay between requests (ms)
+```
+
+### API Keys for Enhanced Discovery
+
+Add API keys to `config.yaml` for significantly better subdomain discovery:
+```yaml
+api_keys:
+  shodan: "your-api-key"
+  virustotal: "your-api-key"
+  securitytrails: "your-api-key"
+  # ... more services
+```
+
+Free API key sources:
+- [Shodan](https://account.shodan.io/register) - 100 results/month
+- [Censys](https://censys.io/register) - 250 queries/month
+- [VirusTotal](https://www.virustotal.com/gui/join-us) - 500 requests/day
+- [SecurityTrails](https://securitytrails.com/app/signup) - 50 queries/month
+- [GitHub](https://github.com/settings/tokens) - Unlimited for public repos
+
 ### Customizing Scans
 
-Edit `directory_scanner.py` to add custom paths:
+Edit `scanners/directory_scanner.py` to add custom paths:
 ```python
 bucket_patterns = [
     '/file-service/static/',
@@ -129,32 +159,32 @@ bucket_patterns = [
 
 ### Adjusting Recursion Depth
 
-In `subfinder_amass_scanner.py`, change the `max_depth` parameter:
+In `scanner.py`, change the `max_depth` parameter:
 ```python
 discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
 #                                                                        ↑
 #                                                          Increase for deeper scans
 ```
 
-### Wordlist Configuration
-
-The scanner uses `/app/wordlist.txt` in Docker. To use a custom wordlist:
-```bash
-# Mount your wordlist
-docker run -v /path/to/your/wordlist.txt:/app/wordlist.txt -it security-nuclei example.com
-```
-
 ## 📂 Project Structure
 
 ```
 SecurityScanner/
-├── subfinder_amass_scanner.py  # Main orchestrator
-├── directory_scanner.py         # Recursive fuzzing & bucket detection
-├── admin_scanner.py             # Admin panel detection
-├── backup_scanner.py            # Backup file discovery
-├── Dockerfile                   # Container configuration
-├── wordlist.txt                 # Directory fuzzing wordlist
-└── config.yaml                  # Configuration file
+├── scanner.py                    # Main entry point
+├── config.yaml                   # Configuration & rate limiting
+├── requirements.txt              # Python dependencies
+├── Dockerfile                    # Container configuration
+├── README.md                     # This file
+│
+├── config/                       # Configuration files
+│   ├── amass-config.ini         # Amass API keys
+│   └── subfinder-config.yaml    # Subfinder API keys
+│
+└── scanners/                     # Scanner modules
+    ├── __init__.py              # Package initializer
+    ├── admin_scanner.py         # Admin panel detection
+    ├── backup_scanner.py        # Backup file discovery
+    └── directory_scanner.py     # Recursive fuzzing & bucket detection
 ```
 
 ## 🔧 Key Features Explained
@@ -210,7 +240,7 @@ Detects three types of exposures:
 
 ### No subdomains found
 - Target may have no public subdomains
-- Try adding API keys for Subfinder (see Subfinder docs)
+- Try adding API keys for Subfinder (see Configuration section)
 - Base domain will still be scanned
 
 ### Fuzzing times out
@@ -222,6 +252,11 @@ Detects three types of exposures:
 - Ensure Docker is installed and running
 - Check internet connectivity (downloads tools)
 - Try: `docker system prune -a` to clean cache
+
+### Import errors
+- Ensure you're running from the project root directory
+- Check that `scanners/` directory exists with `__init__.py`
+- Verify all dependencies: `pip install -r requirements.txt`
 
 ## 📝 Output Interpretation
 
@@ -242,7 +277,7 @@ Detects three types of exposures:
 ## 🤝 Contributing
 
 Contributions welcome! Feel free to:
-- Add new scanner modules
+- Add new scanner modules to `scanners/`
 - Improve detection patterns
 - Enhance recursive fuzzing logic
 - Add new wordlists or templates
@@ -257,6 +292,6 @@ rocket452 - [GitHub](https://github.com/rocket452/SecurityScanner)
 
 ---
 
-**Version**: 2.0 (Nuclei Branch)  
+**Version**: 3.0 (Reorganized Structure)  
 **Last Updated**: January 2026  
 **Status**: Production Ready 🚀
