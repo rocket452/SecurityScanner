@@ -1,0 +1,72 @@
+# Subfinder Configuration File
+# Add your API keys below for enhanced subdomain discovery
+# All keys are optional - subfinder works without them but finds more with them
+
+# How to get free API keys:
+# - Shodan: https://account.shodan.io/register (100 results/month)
+# - Censys: https://censys.io/register (250 queries/month)
+# - VirusTotal: https://www.virustotal.com/gui/join-us (500 requests/day)
+# - SecurityTrails: https://securitytrails.com/app/signup (50 queries/month)
+# - GitHub: https://github.com/settings/tokens
+# - URLScan: https://urlscan.io/user/signup (1000 scans/day)
+
+# Shodan
+shodan:
+  - 
+
+# Censys
+censys:
+  - 
+  # Second value is secret
+  - 
+
+# VirusTotal
+virustotal:
+  - 
+
+# SecurityTrails
+securitytrails:
+  - 
+
+# GitHub Personal Access Token
+github:
+  - 
+
+# URLScan
+urlscan:
+  - 
+
+# PassiveTotal (RiskIQ)
+passivetotal:
+  - # username
+  - # key
+
+# BinaryEdge
+binaryedge:
+  - 
+
+# Chaos (ProjectDiscovery)
+chaos:
+  - 
+
+# Fofa
+fofa:
+  - # email
+  - # key
+
+# Hunter
+hunter:
+  - 
+
+# Quake
+quake:
+  - 
+
+# WhoisXML API
+whoisxmlapi:
+  - 
+
+# ZoomEye
+zoomeye:
+  - # username
+  - # password
