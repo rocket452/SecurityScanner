@@ -86,17 +86,22 @@ def scan_vulnerabilities(url):
                     vulns.append(f'Path exists (forbidden): {path} [{status}]')
                     log(f'PATH EXISTS: {path} [{status}]', 'INFO')
         
-        # Directory fuzzing
-        log(f'Fuzzing directories on {url}', 'INFO')
+        # Recursive directory fuzzing (max depth 3)
+        log(f'Starting recursive directory fuzzing on {url}', 'INFO')
         from directory_scanner import fuzz_directories
-        discovered = fuzz_directories(url, timeout=120)
+        discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
         if discovered:
-            log(f'Discovered {len(discovered)} paths via fuzzing', 'OK')
-            for path, status in discovered[:10]:  # Limit output to top 10
+            log(f'Discovered {len(discovered)} total paths via recursive fuzzing', 'OK')
+            # Report all discovered paths
+            for path, status in discovered:
                 vulns.append(f'Discovered path: /{path} [{status}]')
-                log(f'FUZZ: /{path} [{status}]', 'VULN')
+                # Only log first 20 to avoid spam
+                if len([v for v in vulns if 'Discovered path' in v]) <= 20:
+                    log(f'FUZZ: /{path} [{status}]', 'VULN')
+            if len(discovered) > 20:
+                log(f'... and {len(discovered) - 20} more paths (check report for full list)', 'INFO')
         else:
-            log('No paths discovered via fuzzing', 'INFO')
+            log('No paths discovered via recursive fuzzing', 'INFO')
         
         # Nuclei scan (increased timeout)
         log(f'Running Nuclei on {url}', 'INFO')
