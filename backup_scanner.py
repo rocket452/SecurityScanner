@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import requests
+import urllib3
 import re
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def check_backup(url):
     """Hunt for backup files/downloads"""

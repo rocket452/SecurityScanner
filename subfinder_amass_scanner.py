@@ -11,55 +11,56 @@ def log(msg, level='INFO'):
 
 def run_subfinder(target):
     log(f'Subfinder on {target}')
-    cmds = [
-        ['subfinder', '-d', target, '-silent'],
-        ['docker', 'run', '--rm', 'projectdiscovery/subfinder:latest', '-d', target, '-silent']
-    ]
-    for i, cmd in enumerate(cmds):
-        try:
-            log(f'Try {i+1}: {" ".join(cmd[:3])}...')
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
-            subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
-            if subs:
-                log(f'Subfinder success ({len(subs)} subs)', 'OK')
-                return subs
-        except subprocess.TimeoutExpired:
-            log('Timeout', 'WARN')
-        except FileNotFoundError as e:
-            log(f'Missing: {cmd[0]}', 'WARN')
-        except subprocess.CalledProcessError as e:
-            log(f'Error {e.returncode}: {e.stderr[:200]}...', 'ERROR')
-        except Exception as e:
-            log(f'Unexpected: {e}', 'ERROR')
+    cmd = ['subfinder', '-d', target, '-silent']
+    try:
+        log(f'Running: {" ".join(cmd)}')
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+        subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
+        if subs:
+            log(f'Subfinder found {len(subs)} subdomain(s)', 'OK')
+            for sub in sorted(subs):
+                log(f'  → {sub}', 'OK')
+            return subs
+        else:
+            log('Subfinder found no subdomains', 'INFO')
+    except subprocess.TimeoutExpired:
+        log('Timeout', 'WARN')
+    except FileNotFoundError:
+        log('Subfinder not installed', 'WARN')
+    except subprocess.CalledProcessError as e:
+        log(f'Error {e.returncode}: {e.stderr[:200]}...', 'ERROR')
+    except Exception as e:
+        log(f'Unexpected: {e}', 'ERROR')
     return set()
 
 def run_amass(target):
     log(f'Amass on {target}')
-    cmds = [
-        ['amass', 'enum', '-passive', '-d', target, '-silent'],
-        ['docker', 'run', '--rm', 'owaspamass/amass:latest', 'enum', '-passive', '-d', target, '-silent']
-    ]
-    for i, cmd in enumerate(cmds):
-        try:
-            log(f'Try {i+1}: {" ".join(cmd[:4])}...')
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600)
-            subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
-            if subs:
-                log(f'Amass success ({len(subs)} subs)', 'OK')
-                return subs
-        except subprocess.TimeoutExpired:
-            log('Timeout', 'WARN')
-        except FileNotFoundError as e:
-            log(f'Missing: {cmd[0]}', 'WARN')
-        except subprocess.CalledProcessError as e:
-            log(f'Exit {e.returncode}: {e.stderr[:300] or e.stdout[:300]}...', 'ERROR')
-        except Exception as e:
-            log(f'Unexpected: {e}', 'ERROR')
+    cmd = ['amass', 'enum', '-passive', '-d', target, '-silent']
+    try:
+        log(f'Running: {" ".join(cmd)}')
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600)
+        subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
+        if subs:
+            log(f'Amass found {len(subs)} subdomain(s)', 'OK')
+            for sub in sorted(subs):
+                log(f'  → {sub}', 'OK')
+            return subs
+        else:
+            log('Amass found no subdomains', 'INFO')
+    except subprocess.TimeoutExpired:
+        log('Timeout', 'WARN')
+    except FileNotFoundError:
+        log('Amass not installed', 'WARN')
+    except subprocess.CalledProcessError as e:
+        log(f'Exit {e.returncode}: {e.stderr[:300] or e.stdout[:300]}...', 'ERROR')
+    except Exception as e:
+        log(f'Unexpected: {e}', 'ERROR')
     return set()
 
 def scan_vulnerabilities(url):
     vulns = []
     try:
+        # Basic scanners
         from admin_scanner import check_admin
         from backup_scanner import check_backup
         if check_admin(url):
@@ -68,39 +69,106 @@ def scan_vulnerabilities(url):
         if check_backup(url):
             vulns.append('Backup file found')
             log(f'BACKUP on {url}', 'VULN')
+        
+        # Check for exposed buckets/storage first
+        log(f'Checking for exposed buckets/storage on {url}', 'INFO')
+        from directory_scanner import check_exposed_buckets
+        bucket_results = check_exposed_buckets(url)
+        if bucket_results:
+            for path, status, vuln_type in bucket_results:
+                if vuln_type == 'DIRECTORY_LISTING':
+                    vulns.append(f'Exposed directory listing: {path} [{status}]')
+                    log(f'BUCKET EXPOSED: {path} [{status}] - {vuln_type}', 'VULN')
+                elif vuln_type == 'ACCESSIBLE':
+                    vulns.append(f'Accessible path: {path} [{status}]')
+                    log(f'ACCESSIBLE PATH: {path} [{status}]', 'VULN')
+                elif vuln_type == 'FORBIDDEN_BUT_EXISTS':
+                    vulns.append(f'Path exists (forbidden): {path} [{status}]')
+                    log(f'PATH EXISTS: {path} [{status}]', 'INFO')
+        
+        # Recursive directory fuzzing (max depth 3)
+        log(f'Starting recursive directory fuzzing on {url}', 'INFO')
+        from directory_scanner import fuzz_directories
+        discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
+        if discovered:
+            log(f'Discovered {len(discovered)} total paths via recursive fuzzing', 'OK')
+            # Report all discovered paths
+            for path, status in discovered:
+                vulns.append(f'Discovered path: /{path} [{status}]')
+                # Only log first 20 to avoid spam
+                if len([v for v in vulns if 'Discovered path' in v]) <= 20:
+                    log(f'FUZZ: /{path} [{status}]', 'VULN')
+            if len(discovered) > 20:
+                log(f'... and {len(discovered) - 20} more paths (check report for full list)', 'INFO')
+        else:
+            log('No paths discovered via recursive fuzzing', 'INFO')
+        
+        # Nuclei scan (increased timeout)
+        log(f'Running Nuclei on {url}', 'INFO')
+        result = subprocess.run(
+            ['nuclei', '-u', url, '-silent', '-nc', '-severity', 'critical,high,medium'],
+            capture_output=True, text=True, timeout=180
+        )
+        if result.stdout.strip():
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    vulns.append(f'Nuclei: {line.strip()}')
+                    log(f'NUCLEI: {line.strip()}', 'VULN')
+    except subprocess.TimeoutExpired:
+        log('Nuclei timeout', 'WARN')
+    except FileNotFoundError:
+        log('Nuclei not installed', 'WARN')
     except Exception as e:
         log(f'Scanner error: {e}', 'WARN')
     return vulns
 
 def probe_subdomains(subdomains):
     live = []
-    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=10.0, follow_redirects=True, verify=False) as client:
         for sub in sorted(subdomains):
             for proto in ['https', 'http']:
                 try:
                     resp = client.get(f'{proto}://{sub}')
-                    if resp.status_code == 200:
+                    # Accept any 2xx, 3xx, or 4xx status code (scan reachable hosts even if blocked)
+                    if 200 <= resp.status_code < 500:
                         vulns = scan_vulnerabilities(f'{proto}://{sub}')
                         live.append((f'{proto}://{sub}', vulns))
-                        print(f'✅ {proto}://{sub} (200)')
+                        print(f'✅ {proto}://{sub} ({resp.status_code})')
                         break
-                except:
-                    pass
+                    else:
+                        log(f'{proto}://{sub} returned {resp.status_code}', 'DEBUG')
+                except Exception as e:
+                    log(f'{proto}://{sub} unreachable: {str(e)[:50]}', 'DEBUG')
     return live
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Security Scanner w/ Detailed Logs')
+    parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
     parser.add_argument('target', help='Target domain')
     args = parser.parse_args()
     
-    print(f'🔍 {args.target}')
+    print(f'\n🔍 {args.target}')
+    print('=' * 60)
+    
     subs1 = run_subfinder(args.target)
     subs2 = run_amass(args.target)
     all_subs = subs1.union(subs2)
-    print(f'{len(all_subs)} subs: {sorted(all_subs)}')
+    
+    # Always include base domain in scan
+    all_subs.add(args.target)
+    log(f'Including base domain in scan: {args.target}', 'INFO')
+    
+    print('\n' + '=' * 60)
+    print(f'📊 SUMMARY: {len(all_subs)} total target(s) to scan')
+    print('=' * 60)
+    for sub in sorted(all_subs):
+        print(f'  • {sub}')
+    print('=' * 60 + '\n')
     
     live_scans = probe_subdomains(all_subs)
     print('\n🚨 VULNERABILITIES:')
     for url, vulns in live_scans:
         for v in vulns:
             print(f'{url}: {v}')
+    
+    if not any(vulns for _, vulns in live_scans):
+        print('No vulnerabilities detected.')
