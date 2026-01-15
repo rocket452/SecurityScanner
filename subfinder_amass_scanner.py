@@ -11,50 +11,42 @@ def log(msg, level='INFO'):
 
 def run_subfinder(target):
     log(f'Subfinder on {target}')
-    cmds = [
-        ['subfinder', '-d', target, '-silent'],
-        ['docker', 'run', '--rm', 'projectdiscovery/subfinder:latest', '-d', target, '-silent']
-    ]
-    for i, cmd in enumerate(cmds):
-        try:
-            log(f'Try {i+1}: {" ".join(cmd[:3])}...')
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
-            subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
-            if subs:
-                log(f'Subfinder success ({len(subs)} subs)', 'OK')
-                return subs
-        except subprocess.TimeoutExpired:
-            log('Timeout', 'WARN')
-        except FileNotFoundError as e:
-            log(f'Missing: {cmd[0]}', 'WARN')
-        except subprocess.CalledProcessError as e:
-            log(f'Error {e.returncode}: {e.stderr[:200]}...', 'ERROR')
-        except Exception as e:
-            log(f'Unexpected: {e}', 'ERROR')
+    cmd = ['subfinder', '-d', target, '-silent']
+    try:
+        log(f'Running: {" ".join(cmd)}')
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+        subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
+        if subs:
+            log(f'Subfinder success ({len(subs)} subs)', 'OK')
+            return subs
+    except subprocess.TimeoutExpired:
+        log('Timeout', 'WARN')
+    except FileNotFoundError:
+        log('Subfinder not installed', 'WARN')
+    except subprocess.CalledProcessError as e:
+        log(f'Error {e.returncode}: {e.stderr[:200]}...', 'ERROR')
+    except Exception as e:
+        log(f'Unexpected: {e}', 'ERROR')
     return set()
 
 def run_amass(target):
     log(f'Amass on {target}')
-    cmds = [
-        ['amass', 'enum', '-passive', '-d', target, '-silent'],
-        ['docker', 'run', '--rm', 'owaspamass/amass:latest', 'enum', '-passive', '-d', target, '-silent']
-    ]
-    for i, cmd in enumerate(cmds):
-        try:
-            log(f'Try {i+1}: {" ".join(cmd[:4])}...')
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600)
-            subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
-            if subs:
-                log(f'Amass success ({len(subs)} subs)', 'OK')
-                return subs
-        except subprocess.TimeoutExpired:
-            log('Timeout', 'WARN')
-        except FileNotFoundError as e:
-            log(f'Missing: {cmd[0]}', 'WARN')
-        except subprocess.CalledProcessError as e:
-            log(f'Exit {e.returncode}: {e.stderr[:300] or e.stdout[:300]}...', 'ERROR')
-        except Exception as e:
-            log(f'Unexpected: {e}', 'ERROR')
+    cmd = ['amass', 'enum', '-passive', '-d', target, '-silent']
+    try:
+        log(f'Running: {" ".join(cmd)}')
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600)
+        subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
+        if subs:
+            log(f'Amass success ({len(subs)} subs)', 'OK')
+            return subs
+    except subprocess.TimeoutExpired:
+        log('Timeout', 'WARN')
+    except FileNotFoundError:
+        log('Amass not installed', 'WARN')
+    except subprocess.CalledProcessError as e:
+        log(f'Exit {e.returncode}: {e.stderr[:300] or e.stdout[:300]}...', 'ERROR')
+    except Exception as e:
+        log(f'Unexpected: {e}', 'ERROR')
     return set()
 
 def scan_vulnerabilities(url):
