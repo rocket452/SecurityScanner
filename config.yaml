@@ -1,3 +1,51 @@
+# SecurityScanner Configuration
 target_domain: "platacard.mx"
 output_file: "vuln_report.json"
 threads: 10  # Future enhancement
+
+# ==============================================================================
+# API KEYS FOR ENHANCED SUBDOMAIN DISCOVERY
+# ==============================================================================
+# Add your free API keys below to significantly increase subdomain discovery.
+# These services are used by both Amass and Subfinder.
+#
+# How to get free API keys:
+# - Shodan: https://account.shodan.io/register (100 results/month free)
+# - Censys: https://censys.io/register (250 queries/month free)
+# - VirusTotal: https://www.virustotal.com/gui/join-us (500 requests/day free)
+# - SecurityTrails: https://securitytrails.com/app/signup (50 queries/month free)
+# - GitHub: https://github.com/settings/tokens (Unlimited for public repos)
+# - URLScan: https://urlscan.io/user/signup (1000 scans/day free)
+#
+# Leave blank if you don't have the API key
+# ==============================================================================
+
+api_keys:
+  # Shodan - Network intelligence
+  shodan: ""
+  
+  # Censys - Internet-wide scanning
+  censys_id: ""
+  censys_secret: ""
+  
+  # VirusTotal - Threat intelligence
+  virustotal: ""
+  
+  # SecurityTrails - DNS history
+  securitytrails: ""
+  
+  # GitHub - Code search for subdomains
+  github: ""
+  
+  # URLScan - URL scanner
+  urlscan: ""
+  
+  # PassiveTotal (RiskIQ)
+  passivetotal_username: ""
+  passivetotal_key: ""
+  
+  # BinaryEdge
+  binaryedge: ""
+  
+  # Chaos (ProjectDiscovery)
+  chaos: ""
