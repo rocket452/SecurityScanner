@@ -170,14 +170,14 @@ def scan_single_domain_for_vulnerabilities(url):
         if bucket_results:
             for path, status, vuln_type in bucket_results:
                 if vuln_type == 'DIRECTORY_LISTING':
-                    vulns.append(f'Exposed directory listing: {path} [{status}]')
+                    vulns.append(f'🚨 Exposed directory listing: {path} [{status}]')
                     log(f'BUCKET EXPOSED: {path} [{status}] - {vuln_type}', 'VULN')
                 elif vuln_type == 'ACCESSIBLE':
-                    vulns.append(f'Accessible path: {path} [{status}]')
+                    vulns.append(f'⚠️  Accessible path: {path} [{status}]')
                     log(f'ACCESSIBLE PATH: {path} [{status}]', 'VULN')
                 elif vuln_type == 'FORBIDDEN_BUT_EXISTS':
-                    vulns.append(f'Path exists (forbidden): {path} [{status}]')
-                    log(f'PATH EXISTS: {path} [{status}]', 'INFO')
+                    # Log it but DON'T add to vulnerabilities list
+                    log(f'PATH EXISTS (forbidden): {path} [{status}]', 'INFO')
         
         # Recursive directory fuzzing
         log(f'Starting recursive directory fuzzing on {url}', 'INFO')
@@ -185,13 +185,21 @@ def scan_single_domain_for_vulnerabilities(url):
         
         if discovered:
             log(f'Discovered {len(discovered)} total paths via recursive fuzzing', 'OK')
+            accessible_count = 0
             for path, status in discovered:
-                vulns.append(f'Discovered path: /{path} [{status}]')
-                if len([v for v in vulns if 'Discovered path' in v]) <= 20:
-                    log(f'FUZZ: /{path} [{status}]', 'VULN')
+                # Only report 200-level and 300-level status codes as findings
+                if status.startswith('2') or status.startswith('3'):
+                    vulns.append(f'Discovered path: /{path} [{status}]')
+                    accessible_count += 1
+                    if accessible_count <= 20:
+                        log(f'FUZZ: /{path} [{status}]', 'VULN')
+                else:
+                    # Log 403, 401 etc. but don't count as vulnerabilities
+                    if accessible_count <= 20:
+                        log(f'FUZZ (blocked): /{path} [{status}]', 'INFO')
             
-            if len(discovered) > 20:
-                log(f'... and {len(discovered) - 20} more paths', 'INFO')
+            if accessible_count > 20:
+                log(f'... and {accessible_count - 20} more accessible paths', 'INFO')
         else:
             log('No paths discovered via recursive fuzzing', 'INFO')
         
