@@ -85,67 +85,151 @@ def check_exposed_buckets(url):
     
     return exposed
 
-def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120):
+def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, max_depth=3, current_depth=0):
     """
-    Use ffuf to discover hidden directories and files
-    Returns list of discovered paths with status codes
+    Recursively fuzz directories using ffuf
+    Returns list of all discovered paths with status codes
     """
-    discovered = []
+    all_discovered = []
+    
+    if current_depth >= max_depth:
+        log(f'Max depth {max_depth} reached, stopping recursion', 'INFO')
+        return all_discovered
+    
+    depth_prefix = '  ' * current_depth
+    log(f'{depth_prefix}Fuzzing at depth {current_depth}: {url}', 'INFO')
+    
     try:
-        # First run: more permissive (without aggressive auto-calibration)
-        log(f'Running ffuf with relaxed filtering against {url}', 'INFO')
+        # Run ffuf on current level
         result = subprocess.run([
             'ffuf',
             '-u', f'{url.rstrip("/")}/FUZZ',
             '-w', wordlist,
-            '-mc', '200,201,202,203,204,301,302,307,308,401,403',  # Include 403 (exists but forbidden)
-            '-fc', '404',  # Only filter 404s
-            '-t', '40',    # 40 threads
+            '-mc', '200,201,202,203,204,301,302,307,308,401,403',
+            '-fc', '404',
+            '-t', '50',
             '-timeout', '3',
-            '-v',          # Verbose to get detailed output
-            '-s'           # Silent mode: suppress banner
+            '-v',
+            '-s'
         ], capture_output=True, text=True, timeout=timeout)
         
-        log(f'ffuf completed with exit code {result.returncode}', 'DEBUG')
-        
-        # Parse verbose format
+        # Parse results
         lines = result.stdout.split('\n')
         current_status = None
+        discovered_this_level = []
         
         for line in lines:
-            # Extract status from [Status: XXX, ...] lines
             status_match = re.search(r'\[Status:\s*(\d+),', line)
             if status_match:
                 current_status = status_match.group(1)
             
-            # Extract path from * FUZZ: path lines
             fuzz_match = re.search(r'\*\s+FUZZ:\s+(\S+)', line)
             if fuzz_match and current_status:
                 path = fuzz_match.group(1)
-                discovered.append((path, current_status))
-                current_status = None  # Reset for next entry
+                full_path = f'{url.rstrip("/")}/{path}'
+                discovered_this_level.append((path, current_status, full_path))
+                all_discovered.append((path, current_status))
+                log(f'{depth_prefix}  └─ {path} [{current_status}]', 'OK')
+                current_status = None
         
-        if discovered:
-            log(f'Found {len(discovered)} paths via fuzzing', 'INFO')
-            # Show first 10 as examples
-            for path, status in discovered[:10]:
-                log(f'  {path} [{status}]', 'INFO')
-            if len(discovered) > 10:
-                log(f'  ... and {len(discovered) - 10} more', 'INFO')
-        else:
-            log('No paths found via fuzzing', 'INFO')
+        # Recursive fuzzing on discovered directories (status 200, 301, 302, 403)
+        if current_depth < max_depth - 1:
+            directories_to_recurse = [
+                (path, full_path) for path, status, full_path in discovered_this_level
+                if status in ['200', '301', '302', '403']  # Likely directories
+            ]
+            
+            if directories_to_recurse:
+                log(f'{depth_prefix}Found {len(directories_to_recurse)} potential directories to recurse into', 'INFO')
+                
+                for path, full_path in directories_to_recurse[:10]:  # Limit recursion to first 10 paths
+                    log(f'{depth_prefix}Recursing into: {path}', 'INFO')
+                    recursive_results = fuzz_directories_recursive(
+                        full_path,
+                        wordlist=wordlist,
+                        timeout=timeout,
+                        max_depth=max_depth,
+                        current_depth=current_depth + 1
+                    )
+                    # Add parent path to recursive results
+                    for rpath, rstatus in recursive_results:
+                        all_discovered.append((f'{path}/{rpath}', rstatus))
         
-        return discovered
+        return all_discovered
         
     except subprocess.TimeoutExpired:
-        log(f'ffuf timeout after {timeout}s', 'WARN')
-        return discovered
+        log(f'{depth_prefix}ffuf timeout at depth {current_depth}', 'WARN')
+        return all_discovered
     except FileNotFoundError:
         log('ffuf not found in PATH', 'WARN')
-        return discovered
+        return all_discovered
     except Exception as e:
-        log(f'ffuf error: {str(e)[:100]}', 'ERROR')
+        log(f'{depth_prefix}ffuf error at depth {current_depth}: {str(e)[:100]}', 'ERROR')
+        return all_discovered
+
+def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=True, max_depth=3):
+    """
+    Main entry point for directory fuzzing
+    If recursive=True, performs recursive fuzzing up to max_depth
+    If recursive=False, performs single-level fuzzing only
+    """
+    if recursive:
+        log(f'Starting recursive directory fuzzing (max depth: {max_depth})', 'INFO')
+        discovered = fuzz_directories_recursive(url, wordlist, timeout, max_depth, current_depth=0)
+        
+        if discovered:
+            log(f'Total paths discovered across all depths: {len(discovered)}', 'OK')
+        else:
+            log('No paths discovered via recursive fuzzing', 'INFO')
+        
         return discovered
+    else:
+        # Original single-level fuzzing
+        log(f'Running single-level ffuf against {url}', 'INFO')
+        discovered = []
+        try:
+            result = subprocess.run([
+                'ffuf',
+                '-u', f'{url.rstrip("/")}/FUZZ',
+                '-w', wordlist,
+                '-mc', '200,201,202,203,204,301,302,307,308,401,403',
+                '-fc', '404',
+                '-t', '40',
+                '-timeout', '3',
+                '-v',
+                '-s'
+            ], capture_output=True, text=True, timeout=timeout)
+            
+            lines = result.stdout.split('\n')
+            current_status = None
+            
+            for line in lines:
+                status_match = re.search(r'\[Status:\s*(\d+),', line)
+                if status_match:
+                    current_status = status_match.group(1)
+                
+                fuzz_match = re.search(r'\*\s+FUZZ:\s+(\S+)', line)
+                if fuzz_match and current_status:
+                    path = fuzz_match.group(1)
+                    discovered.append((path, current_status))
+                    current_status = None
+            
+            if discovered:
+                log(f'Found {len(discovered)} paths', 'INFO')
+            else:
+                log('No paths found', 'INFO')
+            
+            return discovered
+            
+        except subprocess.TimeoutExpired:
+            log(f'ffuf timeout after {timeout}s', 'WARN')
+            return discovered
+        except FileNotFoundError:
+            log('ffuf not found in PATH', 'WARN')
+            return discovered
+        except Exception as e:
+            log(f'ffuf error: {str(e)[:100]}', 'ERROR')
+            return discovered
 
 if __name__ == '__main__':
     import sys
@@ -161,11 +245,11 @@ if __name__ == '__main__':
     else:
         print('No exposed buckets detected')
     
-    # Then run directory fuzzing
-    print('\n=== Directory Fuzzing ===')
-    fuzz_results = fuzz_directories(url)
+    # Then run recursive directory fuzzing
+    print('\n=== Recursive Directory Fuzzing ===')
+    fuzz_results = fuzz_directories(url, recursive=True, max_depth=3)
     if fuzz_results:
-        print(f'\nDiscovered {len(fuzz_results)} paths via fuzzing:')
+        print(f'\nDiscovered {len(fuzz_results)} paths via recursive fuzzing:')
         for path, status in fuzz_results:
             print(f'  [{status}] {path}')
     else:
