@@ -17,8 +17,12 @@ def run_subfinder(target):
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
         subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
         if subs:
-            log(f'Subfinder success ({len(subs)} subs)', 'OK')
+            log(f'Subfinder found {len(subs)} subdomain(s)', 'OK')
+            for sub in sorted(subs):
+                log(f'  → {sub}', 'OK')
             return subs
+        else:
+            log('Subfinder found no subdomains', 'INFO')
     except subprocess.TimeoutExpired:
         log('Timeout', 'WARN')
     except FileNotFoundError:
@@ -37,8 +41,12 @@ def run_amass(target):
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600)
         subs = set(line.strip() for line in result.stdout.split('\n') if line.strip())
         if subs:
-            log(f'Amass success ({len(subs)} subs)', 'OK')
+            log(f'Amass found {len(subs)} subdomain(s)', 'OK')
+            for sub in sorted(subs):
+                log(f'  → {sub}', 'OK')
             return subs
+        else:
+            log('Amass found no subdomains', 'INFO')
     except subprocess.TimeoutExpired:
         log('Timeout', 'WARN')
     except FileNotFoundError:
@@ -117,7 +125,9 @@ if __name__ == '__main__':
     parser.add_argument('target', help='Target domain')
     args = parser.parse_args()
     
-    print(f'🔍 {args.target}')
+    print(f'\n🔍 {args.target}')
+    print('=' * 60)
+    
     subs1 = run_subfinder(args.target)
     subs2 = run_amass(args.target)
     all_subs = subs1.union(subs2)
@@ -126,7 +136,12 @@ if __name__ == '__main__':
     all_subs.add(args.target)
     log(f'Including base domain in scan: {args.target}', 'INFO')
     
-    print(f'{len(all_subs)} targets: {sorted(all_subs)}')
+    print('\n' + '=' * 60)
+    print(f'📊 SUMMARY: {len(all_subs)} total target(s) to scan')
+    print('=' * 60)
+    for sub in sorted(all_subs):
+        print(f'  • {sub}')
+    print('=' * 60 + '\n')
     
     live_scans = probe_subdomains(all_subs)
     print('\n🚨 VULNERABILITIES:')
