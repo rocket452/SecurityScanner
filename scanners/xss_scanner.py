@@ -107,6 +107,7 @@ def test_dom_xss(url: str, timeout: int = 10) -> List[Dict]:
         List of dictionaries containing vulnerability details
     """
     vulnerabilities = []
+    found_patterns = set()  # Track which patterns we've already reported
     
     # Dangerous JavaScript patterns that could lead to DOM XSS
     dangerous_patterns = [
@@ -129,21 +130,37 @@ def test_dom_xss(url: str, timeout: int = 10) -> List[Dict]:
             
             for pattern in dangerous_patterns:
                 matches = re.finditer(pattern, response.text, re.IGNORECASE)
+                match_count = 0
+                first_context = None
+                
                 for match in matches:
-                    # Get context around the match
-                    start = max(0, match.start() - 50)
-                    end = min(len(response.text), match.end() + 50)
-                    context = response.text[start:end].replace('\n', ' ')
+                    match_count += 1
+                    # Only store the first match context
+                    if first_context is None:
+                        start = max(0, match.start() - 50)
+                        end = min(len(response.text), match.end() + 50)
+                        first_context = response.text[start:end].replace('\n', ' ')
+                
+                # Only report this pattern once, even if found multiple times
+                if match_count > 0 and pattern not in found_patterns:
+                    found_patterns.add(pattern)
+                    
+                    # Include count in description if multiple instances found
+                    if match_count > 1:
+                        description = f'Potentially dangerous JavaScript pattern found ({match_count} instances): {pattern}'
+                    else:
+                        description = f'Potentially dangerous JavaScript pattern found: {pattern}'
                     
                     vuln = {
                         'type': 'potential_dom_xss',
                         'pattern': pattern,
-                        'context': context,
+                        'count': match_count,
+                        'context': first_context,
                         'severity': 'medium',
-                        'description': f'Potentially dangerous JavaScript pattern found: {pattern}'
+                        'description': description
                     }
                     vulnerabilities.append(vuln)
-                    log(f'DOM XSS pattern: {pattern}', 'VULN')
+                    log(f'DOM XSS pattern: {pattern} ({match_count} instance{"s" if match_count > 1 else ""})', 'VULN')
     
     except Exception as e:
         log(f'DOM XSS scanner error: {str(e)}', 'ERROR')
