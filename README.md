@@ -27,31 +27,7 @@ Automated security reconnaissance tool combining **subdomain enumeration**, **re
 - **Multiple Formats**: JSON, HTML, Markdown, CSV
 - **Detailed Findings**: Includes severity levels, vulnerability types, and descriptions
 - **XSS Details**: Parameter names, payloads used, and vulnerability context
-
-## 📋 How It Works
-
-```
-1. Subdomain Enumeration
-   ├─ Subfinder (passive sources)
-   ├─ Amass (DNS, certs, APIs)
-   └─ Deduplicate & include base domain
-
-2. Live Host Probing
-   ├─ Test HTTPS/HTTP connectivity
-   └─ Accept 200-499 status codes
-
-3. Vulnerability Scanning (per live host)
-   ├─ Check exposed buckets/storage (18+ patterns)
-   ├─ Recursive directory fuzzing (depth: 3)
-   ├─ Admin panel detection
-   ├─ Backup file scanning
-   ├─ XSS vulnerability testing (reflected & DOM-based)
-   └─ Nuclei vulnerability templates
-
-4. Report Results
-   ├─ Print findings to console (real-time output)
-   └─ Save detailed report to file (JSON/HTML/Markdown/CSV)
-```
+- **Auto-saved**: Reports automatically saved to `/reports` directory
 
 ## 🐳 Quick Start (Docker - Recommended)
 
@@ -62,38 +38,34 @@ cd SecurityScanner
 docker build -t security-scanner .
 ```
 
-### Run a Scan
+### Run a Scan - Simple!
 
-**⚠️ Important: Mount a volume to access report files!**
+**Just mount the `/reports` volume once and you're done:**
 
 ```bash
-# Scan with default JSON report (saved to ./reports/ on host)
-docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.json
+# Basic scan with JSON report (default)
+docker run -v $(pwd)/reports:/reports -it security-scanner example.com
 
-# Scan with HTML report
-docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.html -f html
+# HTML report
+docker run -v $(pwd)/reports:/reports -it security-scanner example.com -f html
 
-# Scan with Markdown report
-docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.md -f markdown
+# Markdown report
+docker run -v $(pwd)/reports:/reports -it security-scanner example.com -f markdown
 
-# Scan with CSV report
-docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.csv -f csv
+# CSV report
+docker run -v $(pwd)/reports:/reports -it security-scanner example.com -f csv
 
-# Console output only (no file saved)
+# Console output only (no file)
 docker run -it security-scanner example.com --no-file
-
-# Auto-generated filename with timestamp
-docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/scan_$(date +%Y%m%d_%H%M%S).json
 ```
 
 **Windows PowerShell:**
 ```powershell
-# Create reports directory
-mkdir reports
-
-# Run scan with volume mount
-docker run -v ${PWD}/reports:/app/reports -it security-scanner example.com -o /app/reports/report.json
+# Basic scan
+docker run -v ${PWD}/reports:/reports -it security-scanner example.com
 ```
+
+**That's it!** Reports are automatically saved to `./reports/` on your host machine.
 
 ### Command Line Options
 ```bash
@@ -105,7 +77,7 @@ Positional arguments:
 Optional arguments:
   -h, --help           Show help message
   -o OUTPUT, --output OUTPUT
-                       Output file path (default: auto-generated with timestamp)
+                       Output file path (default: /reports/report_<target>_<timestamp>.<format>)
   -f {json,html,markdown,csv}, --format {json,html,markdown,csv}
                        Report format (default: json)
   --no-file            Skip saving report to file (console only)
@@ -137,8 +109,10 @@ Optional arguments:
 https://example.com: Reflected XSS found in parameter "search"
 https://example.com: Exposed directory listing: /file-service/static/ [200]
 
-[INFO] Report saved to: /app/reports/report_example_com_20260116_025823.json
+[INFO] Report saved to: /reports/report_example_com_20260116_025823.json
 ```
+
+**Your report will be in `./reports/` on your computer!**
 
 ## 💻 Local Installation
 
@@ -156,7 +130,10 @@ pip install -r requirements.txt
 
 ### Run Locally
 ```bash
-# Run scan with JSON report (default)
+# Create reports directory
+mkdir reports
+
+# Run scan with JSON report (default) - saves to ./reports/
 python scanner.py example.com
 
 # Run scan with HTML report
@@ -232,7 +209,7 @@ discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
 To use your own wordlist:
 ```bash
 # Docker: Mount custom wordlist
-docker run -v /path/to/wordlist.txt:/app/wordlist.txt -it security-scanner example.com
+docker run -v $(pwd)/reports:/reports -v /path/to/wordlist.txt:/app/wordlist.txt -it security-scanner example.com
 
 # Local: Modify scanners/directory_scanner.py
 # Change wordlist='/app/wordlist.txt' to your path
@@ -301,7 +278,7 @@ Detects three types of exposures:
 - All findings are printed to console in real-time
 - Structured logging with severity levels
 - Visual tree structure for recursive fuzzing results
-- Detailed report saved to file in multiple formats
+- Detailed report automatically saved to `/reports` directory
 
 ## 📊 Performance
 
@@ -329,12 +306,13 @@ Detects three types of exposures:
 ## 🐛 Troubleshooting
 
 ### Report file not found
-- **Docker users**: You MUST mount a volume to access reports
-  ```bash
-  docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.json
-  ```
-- **Local users**: Check current directory for report files
-- The report path is logged at the end: `[INFO] Report saved to: ...`
+- **Docker**: Make sure you mounted the volume: `-v $(pwd)/reports:/reports`
+- **Local**: Reports are saved to `/reports/` directory by default
+- Check the console output for the exact path: `[INFO] Report saved to: ...`
+
+### Permission denied when saving report
+- **Docker**: The `/reports` directory needs write permissions
+- **Fix**: The Docker container creates the directory automatically, but if you pre-created it, run: `chmod 777 ./reports`
 
 ### No subdomains found
 - Target may have no public subdomains
