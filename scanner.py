@@ -26,6 +26,10 @@ def load_config():
 
 CONFIG = load_config()
 
+# Global variables for tracking scan metadata
+SCAN_START_TIME = None
+ALL_SUBDOMAINS = []
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -34,6 +38,9 @@ def main():
     """
     Main entry point for the security scanner.
     """
+    global SCAN_START_TIME, ALL_SUBDOMAINS
+    SCAN_START_TIME = datetime.now()
+    
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
     parser.add_argument('target', help='Target domain')
@@ -70,6 +77,7 @@ def main():
     
     # Deduplicate the domains
     sub_domains = deduplicate_domains(sub_domains)
+    ALL_SUBDOMAINS = sub_domains
     
     # Print summary of domains to scan
     print_scan_summary(sub_domains, target_url)
@@ -200,8 +208,7 @@ def scan_single_domain_for_vulnerabilities(url):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high'})
             log(f'BACKUP on {url}', 'VULN')
         
-        # Exposed buckets/storage detection
-        log(f'Checking for exposed buckets/storage on {url}', 'INFO')
+        # Exposed buckets/storage detection (scanner module handles its own logging)
         bucket_results = check_exposed_buckets(url)
         
         if bucket_results:
@@ -226,8 +233,7 @@ def scan_single_domain_for_vulnerabilities(url):
                     # Log it but DON'T add to vulnerabilities list
                     log(f'PATH EXISTS (forbidden): {path} [{status}]', 'INFO')
         
-        # Recursive directory fuzzing
-        log(f'Starting recursive directory fuzzing on {url}', 'INFO')
+        # Recursive directory fuzzing (scanner module handles its own logging)
         discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
         
         if discovered:

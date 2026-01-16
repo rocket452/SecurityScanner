@@ -42,7 +42,7 @@ Automated security reconnaissance tool combining **subdomain enumeration**, **re
    └─ Nuclei vulnerability templates
 
 4. Report Results
-   └─ Detailed vulnerability report with paths and status codes
+   └─ Print findings to console (real-time output)
 ```
 
 ## 🐳 Quick Start (Docker - Recommended)
@@ -51,7 +51,6 @@ Automated security reconnaissance tool combining **subdomain enumeration**, **re
 ```bash
 git clone https://github.com/rocket452/SecurityScanner.git
 cd SecurityScanner
-git checkout cleanupProcess
 docker build -t security-scanner .
 ```
 
@@ -59,6 +58,9 @@ docker build -t security-scanner .
 ```bash
 # Basic scan
 docker run -it security-scanner example.com
+
+# Scan and save output to file
+docker run -it security-scanner example.com > report.txt
 
 # Scan specific target
 docker run -it security-scanner prime.platacard.mx
@@ -111,7 +113,14 @@ pip install -r requirements.txt
 
 ### Run Locally
 ```bash
+# Run scan (output to console)
 python scanner.py example.com
+
+# Save output to file
+python scanner.py example.com > report.txt
+
+# Save output with timestamp
+python scanner.py example.com > scan_$(date +%Y%m%d_%H%M%S).txt
 ```
 
 ## ⚙️ Configuration
@@ -128,6 +137,11 @@ rate_limiting:
   request_delay: 0              # Delay between requests (ms)
 ```
 
+**Recommendations:**
+- **Stealth mode**: `ffuf_threads: 5`, `nuclei_rate_limit: 50`, `request_delay: 200`
+- **Balanced**: `ffuf_threads: 20`, `nuclei_rate_limit: 150` (default)
+- **Aggressive**: `ffuf_threads: 50`, `nuclei_rate_limit: 300`, `nuclei_concurrency: 50`
+
 ### API Keys for Enhanced Discovery
 
 Add API keys to `config.yaml` for significantly better subdomain discovery:
@@ -136,6 +150,7 @@ api_keys:
   shodan: "your-api-key"
   virustotal: "your-api-key"
   securitytrails: "your-api-key"
+  github: "your-github-token"
   # ... more services
 ```
 
@@ -164,6 +179,17 @@ In `scanner.py`, change the `max_depth` parameter:
 discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
 #                                                                        ↑
 #                                                          Increase for deeper scans
+```
+
+### Custom Wordlists
+
+To use your own wordlist:
+```bash
+# Docker: Mount custom wordlist
+docker run -v /path/to/wordlist.txt:/app/wordlist.txt -it security-scanner example.com
+
+# Local: Modify scanners/directory_scanner.py
+# Change wordlist='/app/wordlist.txt' to your path
 ```
 
 ## 📂 Project Structure
@@ -208,11 +234,11 @@ Detects three types of exposures:
 - **Accessible Paths** (200 but no obvious listing)
 - **Forbidden But Existing** (403 - path exists but blocked)
 
-### Smart Logging
-- Shows each discovered subdomain in real-time
-- Visual tree structure for recursive fuzzing
-- Limits verbose output (first 20 paths) to avoid spam
-- Color-coded vulnerability levels
+### Real-Time Output
+- All findings are printed to console in real-time
+- Redirect output to file for persistence: `python scanner.py target.com > report.txt`
+- Structured logging with severity levels
+- Visual tree structure for recursive fuzzing results
 
 ## 📊 Performance
 
@@ -249,7 +275,7 @@ Detects three types of exposures:
 - Use a smaller wordlist
 
 ### Docker build fails
-- Ensure Docker is installed and running
+- Ensure Docker Desktop is running
 - Check internet connectivity (downloads tools)
 - Try: `docker system prune -a` to clean cache
 
@@ -257,6 +283,10 @@ Detects three types of exposures:
 - Ensure you're running from the project root directory
 - Check that `scanners/` directory exists with `__init__.py`
 - Verify all dependencies: `pip install -r requirements.txt`
+
+### Output not saving
+- Use shell redirection: `python scanner.py target.com > output.txt`
+- Or use `tee` for both console and file: `python scanner.py target.com | tee output.txt`
 
 ## 📝 Output Interpretation
 
@@ -273,6 +303,26 @@ Detects three types of exposures:
 - **Forbidden but exists**: Low risk - path exists but protected
 - **Admin panel exposed**: High risk - potential unauthorized access
 - **Backup file found**: Critical - may contain sensitive data
+- **Nuclei findings**: Varies by template - check Nuclei docs
+
+## 📤 Saving Results
+
+**Current behavior**: Scanner outputs to console only (no automatic file generation)
+
+**To save results:**
+```bash
+# Save all output
+python scanner.py example.com > scan_results.txt 2>&1
+
+# Save only vulnerability findings (filter)
+python scanner.py example.com 2>&1 | grep -E "VULN|🚨|⚠️" > vulnerabilities.txt
+
+# Save with timestamp
+python scanner.py example.com > "scan_$(date +%Y%m%d_%H%M%S).txt" 2>&1
+
+# View and save simultaneously
+python scanner.py example.com 2>&1 | tee scan_results.txt
+```
 
 ## 🤝 Contributing
 
@@ -280,6 +330,7 @@ Contributions welcome! Feel free to:
 - Add new scanner modules to `scanners/`
 - Improve detection patterns
 - Enhance recursive fuzzing logic
+- Add report file generation (JSON/HTML/CSV)
 - Add new wordlists or templates
 
 ## 📄 License
