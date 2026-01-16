@@ -1,6 +1,6 @@
 # SecurityScanner - Advanced Vulnerability Discovery Tool
 
-Automated security reconnaissance tool combining **subdomain enumeration**, **recursive directory fuzzing**, **exposed storage detection**, and **vulnerability scanning** with Nuclei integration.
+Automated security reconnaissance tool combining **subdomain enumeration**, **recursive directory fuzzing**, **exposed storage detection**, **XSS vulnerability testing**, and **vulnerability scanning** with Nuclei integration.
 
 ## 🚀 Features
 
@@ -17,10 +17,16 @@ Automated security reconnaissance tool combining **subdomain enumeration**, **re
 - **Smart Detection**: Identifies directory listings, accessible paths, and forbidden-but-existing paths
 
 ### Vulnerability Scanning
+- **XSS Scanner**: Tests for reflected and DOM-based cross-site scripting vulnerabilities
 - **Nuclei Integration**: Industry-standard vulnerability scanner
 - **Admin Panel Detection**: Scans for exposed admin interfaces
 - **Backup File Discovery**: Detects accessible backup files (.bak, .sql, .zip)
 - **Custom Scanners**: Modular design for easy extension
+
+### Report Generation
+- **Multiple Formats**: JSON, HTML, Markdown, CSV
+- **Detailed Findings**: Includes severity levels, vulnerability types, and descriptions
+- **XSS Details**: Parameter names, payloads used, and vulnerability context
 
 ## 📋 How It Works
 
@@ -39,10 +45,12 @@ Automated security reconnaissance tool combining **subdomain enumeration**, **re
    ├─ Recursive directory fuzzing (depth: 3)
    ├─ Admin panel detection
    ├─ Backup file scanning
+   ├─ XSS vulnerability testing (reflected & DOM-based)
    └─ Nuclei vulnerability templates
 
 4. Report Results
-   └─ Print findings to console (real-time output)
+   ├─ Print findings to console (real-time output)
+   └─ Save detailed report to file (JSON/HTML/Markdown/CSV)
 ```
 
 ## 🐳 Quick Start (Docker - Recommended)
@@ -55,46 +63,81 @@ docker build -t security-scanner .
 ```
 
 ### Run a Scan
+
+**⚠️ Important: Mount a volume to access report files!**
+
 ```bash
-# Basic scan
-docker run -it security-scanner example.com
+# Scan with default JSON report (saved to ./reports/ on host)
+docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.json
 
-# Scan and save output to file
-docker run -it security-scanner example.com > report.txt
+# Scan with HTML report
+docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.html -f html
 
-# Scan specific target
-docker run -it security-scanner prime.platacard.mx
+# Scan with Markdown report
+docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.md -f markdown
+
+# Scan with CSV report
+docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.csv -f csv
+
+# Console output only (no file saved)
+docker run -it security-scanner example.com --no-file
+
+# Auto-generated filename with timestamp
+docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/scan_$(date +%Y%m%d_%H%M%S).json
+```
+
+**Windows PowerShell:**
+```powershell
+# Create reports directory
+mkdir reports
+
+# Run scan with volume mount
+docker run -v ${PWD}/reports:/app/reports -it security-scanner example.com -o /app/reports/report.json
+```
+
+### Command Line Options
+```bash
+Usage: scanner.py [-h] [-o OUTPUT] [-f {json,html,markdown,csv}] [--no-file] target
+
+Positional arguments:
+  target                Target domain to scan
+
+Optional arguments:
+  -h, --help           Show help message
+  -o OUTPUT, --output OUTPUT
+                       Output file path (default: auto-generated with timestamp)
+  -f {json,html,markdown,csv}, --format {json,html,markdown,csv}
+                       Report format (default: json)
+  --no-file            Skip saving report to file (console only)
 ```
 
 ### Example Output
 ```
-🔍 prime.platacard.mx
+🔍 example.com
 ============================================================
 [INFO] Subfinder found 5 subdomain(s)
-[OK]   → api.prime.platacard.mx
-[OK]   → www.prime.platacard.mx
+[OK]   → api.example.com
+[OK]   → www.example.com
 
 ============================================================
 📊 SUMMARY: 6 total target(s) to scan
 ============================================================
-  • api.prime.platacard.mx
-  • prime.platacard.mx
-  • www.prime.platacard.mx
+  • api.example.com
+  • example.com
+  • www.example.com
 ============================================================
 
+[INFO] Running XSS scanner on https://example.com
+[INFO] Testing XSS on parameter: search
+[VULN] XSS FOUND: search with payload: <script>alert('XSS')</script>
 [INFO] Checking for exposed buckets/storage
-🚨 EXPOSED BUCKET: https://prime.platacard.mx/file-service/static/ [200]
-[INFO] Starting recursive directory fuzzing (max depth: 3)
-  Fuzzing at depth 0: https://prime.platacard.mx
-    └─ file-service [200]
-  Fuzzing at depth 1: https://prime.platacard.mx/file-service
-    └─ static [200]
-    └─ api [403]
+🚨 EXPOSED BUCKET: https://example.com/file-service/static/ [200]
 
 🚨 VULNERABILITIES:
-https://prime.platacard.mx: Exposed directory listing: /file-service/static/ [200]
-https://prime.platacard.mx: Discovered path: /file-service [200]
-https://prime.platacard.mx: Discovered path: /file-service/static [200]
+https://example.com: Reflected XSS found in parameter "search"
+https://example.com: Exposed directory listing: /file-service/static/ [200]
+
+[INFO] Report saved to: /app/reports/report_example_com_20260116_025823.json
 ```
 
 ## 💻 Local Installation
@@ -113,14 +156,17 @@ pip install -r requirements.txt
 
 ### Run Locally
 ```bash
-# Run scan (output to console)
+# Run scan with JSON report (default)
 python scanner.py example.com
 
-# Save output to file
-python scanner.py example.com > report.txt
+# Run scan with HTML report
+python scanner.py example.com -f html
 
-# Save output with timestamp
-python scanner.py example.com > scan_$(date +%Y%m%d_%H%M%S).txt
+# Run scan with custom output path
+python scanner.py example.com -o /path/to/report.json
+
+# Console output only (no file)
+python scanner.py example.com --no-file
 ```
 
 ## ⚙️ Configuration
@@ -210,10 +256,27 @@ SecurityScanner/
     ├── __init__.py              # Package initializer
     ├── admin_scanner.py         # Admin panel detection
     ├── backup_scanner.py        # Backup file discovery
-    └── directory_scanner.py     # Recursive fuzzing & bucket detection
+    ├── directory_scanner.py     # Recursive fuzzing & bucket detection
+    └── xss_scanner.py           # XSS vulnerability testing
 ```
 
 ## 🔧 Key Features Explained
+
+### XSS Vulnerability Testing
+The XSS scanner tests for two types of vulnerabilities:
+
+**Reflected XSS:**
+- Tests 15 different XSS payloads (script tags, event handlers, etc.)
+- Automatically detects URL parameters and tests them
+- Tests common parameter names if none found (search, q, id, etc.)
+- Validates that payloads are exploitable (not just reflected but unescaped)
+- Reports parameter name, payload used, and full vulnerable URL
+
+**DOM-based XSS:**
+- Scans JavaScript code for dangerous patterns
+- Detects `document.write()`, `innerHTML`, `eval()`, etc.
+- Identifies potential client-side injection points
+- Provides code context for manual verification
 
 ### Recursive Fuzzing
 Unlike traditional single-level fuzzing, this scanner:
@@ -236,9 +299,9 @@ Detects three types of exposures:
 
 ### Real-Time Output
 - All findings are printed to console in real-time
-- Redirect output to file for persistence: `python scanner.py target.com > report.txt`
 - Structured logging with severity levels
 - Visual tree structure for recursive fuzzing results
+- Detailed report saved to file in multiple formats
 
 ## 📊 Performance
 
@@ -247,11 +310,12 @@ Detects three types of exposures:
 | Subfinder | 30s-2min | Fast passive enumeration |
 | Amass | 2-10min | Comprehensive but slower |
 | Live Probing | 1-2s/host | Parallel HTTP requests |
+| XSS Testing | 10-30s/host | Tests multiple payloads |
 | Bucket Check | ~5s | 18 patterns tested |
 | Recursive Fuzzing | 2-5min | Depends on depth & wordlist |
 | Nuclei | 1-3min | Template-based scanning |
 
-**Total scan time**: 5-20 minutes per domain (depending on findings)
+**Total scan time**: 5-25 minutes per domain (depending on findings)
 
 ## 🛡️ Security & Ethics
 
@@ -263,6 +327,14 @@ Detects three types of exposures:
 - Use responsibly and ethically
 
 ## 🐛 Troubleshooting
+
+### Report file not found
+- **Docker users**: You MUST mount a volume to access reports
+  ```bash
+  docker run -v $(pwd)/reports:/app/reports -it security-scanner example.com -o /app/reports/report.json
+  ```
+- **Local users**: Check current directory for report files
+- The report path is logged at the end: `[INFO] Report saved to: ...`
 
 ### No subdomains found
 - Target may have no public subdomains
@@ -284,10 +356,6 @@ Detects three types of exposures:
 - Check that `scanners/` directory exists with `__init__.py`
 - Verify all dependencies: `pip install -r requirements.txt`
 
-### Output not saving
-- Use shell redirection: `python scanner.py target.com > output.txt`
-- Or use `tee` for both console and file: `python scanner.py target.com | tee output.txt`
-
 ## 📝 Output Interpretation
 
 ### Status Codes
@@ -298,6 +366,8 @@ Detects three types of exposures:
 - **404**: Not found - doesn't exist
 
 ### Vulnerability Types
+- **Reflected XSS**: High risk - user input reflected without sanitization
+- **Potential DOM XSS**: Medium risk - dangerous JavaScript patterns detected
 - **Exposed directory listing**: High risk - files can be enumerated
 - **Accessible path**: Medium risk - sensitive path exposed
 - **Forbidden but exists**: Low risk - path exists but protected
@@ -305,32 +375,60 @@ Detects three types of exposures:
 - **Backup file found**: Critical - may contain sensitive data
 - **Nuclei findings**: Varies by template - check Nuclei docs
 
-## 📤 Saving Results
+## 📤 Report Formats
 
-**Current behavior**: Scanner outputs to console only (no automatic file generation)
-
-**To save results:**
-```bash
-# Save all output
-python scanner.py example.com > scan_results.txt 2>&1
-
-# Save only vulnerability findings (filter)
-python scanner.py example.com 2>&1 | grep -E "VULN|🚨|⚠️" > vulnerabilities.txt
-
-# Save with timestamp
-python scanner.py example.com > "scan_$(date +%Y%m%d_%H%M%S).txt" 2>&1
-
-# View and save simultaneously
-python scanner.py example.com 2>&1 | tee scan_results.txt
+### JSON Report (Default)
+```json
+{
+  "target": "example.com",
+  "scan_date": "2026-01-16T02:58:23.123456",
+  "total_targets": 3,
+  "total_vulnerabilities": 5,
+  "results": [
+    {
+      "url": "https://example.com",
+      "vulnerability_count": 2,
+      "vulnerabilities": [
+        {
+          "type": "reflected_xss",
+          "parameter": "search",
+          "payload": "<script>alert('XSS')</script>",
+          "severity": "high",
+          "description": "Reflected XSS found in parameter 'search'"
+        }
+      ]
+    }
+  ]
+}
 ```
+
+### HTML Report
+- Color-coded severity levels
+- Responsive design
+- Summary cards with statistics
+- Organized by target URL
+- Professional styling
+
+### Markdown Report
+- Easy to read in text editors
+- Great for documentation
+- Can be converted to PDF
+- Version control friendly
+
+### CSV Report
+- Import into Excel/Google Sheets
+- Easy data analysis
+- Filter and sort vulnerabilities
+- Columns: Target, URL, Type, Description, Severity, Status Code
 
 ## 🤝 Contributing
 
 Contributions welcome! Feel free to:
 - Add new scanner modules to `scanners/`
 - Improve detection patterns
-- Enhance recursive fuzzing logic
-- Add report file generation (JSON/HTML/CSV)
+- Enhance XSS payloads and detection logic
+- Add new report formats
+- Improve recursive fuzzing logic
 - Add new wordlists or templates
 
 ## 📄 License
@@ -343,6 +441,6 @@ rocket452 - [GitHub](https://github.com/rocket452/SecurityScanner)
 
 ---
 
-**Version**: 3.0 (Reorganized Structure)  
+**Version**: 4.0 (XSS Scanner Integration)  
 **Last Updated**: January 2026  
 **Status**: Production Ready 🚀
