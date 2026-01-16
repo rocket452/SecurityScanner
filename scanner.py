@@ -4,6 +4,10 @@ import sys
 import argparse
 import httpx
 import yaml
+import json
+import os
+from datetime import datetime
+from pathlib import Path
 
 # Load configuration
 def load_config():
@@ -22,6 +26,10 @@ def load_config():
 
 CONFIG = load_config()
 
+# Global variables for tracking scan metadata
+SCAN_START_TIME = None
+ALL_SUBDOMAINS = []
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -30,9 +38,13 @@ def main():
     """
     Main entry point for the security scanner.
     """
+    global SCAN_START_TIME, ALL_SUBDOMAINS
+    SCAN_START_TIME = datetime.now()
+    
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
     parser.add_argument('target', help='Target domain')
+    parser.add_argument('--no-report', action='store_true', help='Skip JSON report generation')
     args = parser.parse_args()
     
     target_url = args.target
@@ -62,6 +74,7 @@ def main():
     
     # Deduplicate the domains
     sub_domains = deduplicate_domains(sub_domains)
+    ALL_SUBDOMAINS = sub_domains
     
     # Print summary of domains to scan
     print_scan_summary(sub_domains, target_url)
@@ -71,6 +84,10 @@ def main():
     
     # Print vulnerability report
     print_vulnerability_report(scan_results)
+    
+    # Generate JSON report unless --no-report is specified
+    if not args.no_report:
+        save_json_report(target_url, sub_domains, scan_results)
 
 # ============================================================================
 # LOGGING UTILITIES
@@ -178,12 +195,20 @@ def scan_single_domain_for_vulnerabilities(url):
         
         # Admin panel detection
         if check_admin(url):
-            vulns.append('Admin panel exposed')
+            vulns.append({
+                'type': 'admin_panel',
+                'description': 'Admin panel exposed',
+                'severity': 'high'
+            })
             log(f'ADMIN on {url}', 'VULN')
         
         # Backup file detection
         if check_backup(url):
-            vulns.append('Backup file found')
+            vulns.append({
+                'type': 'backup_file',
+                'description': 'Backup file found',
+                'severity': 'critical'
+            })
             log(f'BACKUP on {url}', 'VULN')
         
         # Exposed buckets/storage detection
@@ -193,10 +218,22 @@ def scan_single_domain_for_vulnerabilities(url):
         if bucket_results:
             for path, status, vuln_type in bucket_results:
                 if vuln_type == 'DIRECTORY_LISTING':
-                    vulns.append(f'🚨 Exposed directory listing: {path} [{status}]')
+                    vulns.append({
+                        'type': 'exposed_directory_listing',
+                        'description': f'Exposed directory listing: {path}',
+                        'path': path,
+                        'status_code': status,
+                        'severity': 'high'
+                    })
                     log(f'BUCKET EXPOSED: {path} [{status}] - {vuln_type}', 'VULN')
                 elif vuln_type == 'ACCESSIBLE':
-                    vulns.append(f'⚠️  Accessible path: {path} [{status}]')
+                    vulns.append({
+                        'type': 'accessible_path',
+                        'description': f'Accessible path: {path}',
+                        'path': path,
+                        'status_code': status,
+                        'severity': 'medium'
+                    })
                     log(f'ACCESSIBLE PATH: {path} [{status}]', 'VULN')
                 elif vuln_type == 'FORBIDDEN_BUT_EXISTS':
                     # Log it but DON'T add to vulnerabilities list
@@ -212,7 +249,13 @@ def scan_single_domain_for_vulnerabilities(url):
             for path, status in discovered:
                 # Only report 200-level and 300-level status codes as findings
                 if status.startswith('2') or status.startswith('3'):
-                    vulns.append(f'Discovered path: /{path} [{status}]')
+                    vulns.append({
+                        'type': 'discovered_path',
+                        'description': f'Discovered path: /{path}',
+                        'path': f'/{path}',
+                        'status_code': status,
+                        'severity': 'low'
+                    })
                     accessible_count += 1
                     if accessible_count <= 20:
                         log(f'FUZZ: /{path} [{status}]', 'VULN')
@@ -246,7 +289,11 @@ def scan_single_domain_for_vulnerabilities(url):
         if result.stdout.strip():
             for line in result.stdout.strip().split('\n'):
                 if line.strip():
-                    vulns.append(f'Nuclei: {line.strip()}')
+                    vulns.append({
+                        'type': 'nuclei',
+                        'description': line.strip(),
+                        'severity': 'varies'
+                    })
                     log(f'NUCLEI: {line.strip()}', 'VULN')
                     
     except subprocess.TimeoutExpired:
@@ -307,7 +354,12 @@ def print_vulnerability_report(scan_results):
         if vulns:
             has_vulns = True
             for vuln in vulns:
-                print(f'{url}: {vuln}')
+                # Handle both old string format and new dict format
+                if isinstance(vuln, dict):
+                    desc = vuln.get('description', 'Unknown vulnerability')
+                    print(f'{url}: {desc}')
+                else:
+                    print(f'{url}: {vuln}')
     
     if not has_vulns:
         print('No vulnerabilities detected.')
@@ -320,6 +372,81 @@ def print_scan_summary(domains, target):
     for domain in domains:
         print(f'  • {domain}')
     print('=' * 60 + '\n')
+
+def save_json_report(target, subdomains, scan_results):
+    """
+    Save scan results to JSON report in reports/ folder.
+    """
+    global SCAN_START_TIME
+    
+    # Create reports directory if it doesn't exist
+    reports_dir = Path('reports')
+    reports_dir.mkdir(exist_ok=True)
+    
+    # Calculate scan duration
+    scan_end_time = datetime.now()
+    duration = scan_end_time - SCAN_START_TIME
+    duration_str = f"{int(duration.total_seconds() // 60)}m {int(duration.total_seconds() % 60)}s"
+    
+    # Count vulnerabilities by severity
+    total_vulns = 0
+    vuln_by_severity = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+    
+    # Build structured vulnerability list
+    vulnerabilities = []
+    for url, vulns in scan_results:
+        for vuln in vulns:
+            if isinstance(vuln, dict):
+                vuln_entry = {
+                    'url': url,
+                    **vuln
+                }
+                vulnerabilities.append(vuln_entry)
+                total_vulns += 1
+                severity = vuln.get('severity', 'unknown').lower()
+                if severity in vuln_by_severity:
+                    vuln_by_severity[severity] += 1
+    
+    # Count live hosts
+    live_hosts = len([url for url, vulns in scan_results])
+    
+    # Build report structure
+    report = {
+        'scan_metadata': {
+            'target': target,
+            'scan_date': SCAN_START_TIME.isoformat(),
+            'scan_duration': duration_str,
+            'scanner_version': '3.0'
+        },
+        'discovery': {
+            'subdomains_found': len(subdomains),
+            'subdomains': subdomains,
+            'live_hosts': live_hosts
+        },
+        'vulnerability_summary': {
+            'total_vulnerabilities': total_vulns,
+            'by_severity': vuln_by_severity
+        },
+        'vulnerabilities': vulnerabilities
+    }
+    
+    # Generate filename with timestamp
+    timestamp = SCAN_START_TIME.strftime('%Y%m%d_%H%M%S')
+    safe_target = target.replace('/', '_').replace(':', '_')
+    filename = reports_dir / f'scan_{safe_target}_{timestamp}.json'
+    
+    # Save report
+    try:
+        with open(filename, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        log(f'Report saved: {filename}', 'INFO')
+        print(f'\n📊 Report saved to: {filename}')
+        print(f'   Total vulnerabilities: {total_vulns}')
+        print(f'   Critical: {vuln_by_severity["critical"]}, High: {vuln_by_severity["high"]}, '
+              f'Medium: {vuln_by_severity["medium"]}, Low: {vuln_by_severity["low"]}')
+    except Exception as e:
+        log(f'Failed to save report: {e}', 'ERROR')
 
 # ============================================================================
 # BOOTSTRAP
