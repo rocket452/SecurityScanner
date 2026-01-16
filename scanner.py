@@ -211,8 +211,7 @@ def scan_single_domain_for_vulnerabilities(url):
             })
             log(f'BACKUP on {url}', 'VULN')
         
-        # Exposed buckets/storage detection
-        log(f'Checking for exposed buckets/storage on {url}', 'INFO')
+        # Exposed buckets/storage detection (scanner module handles its own logging)
         bucket_results = check_exposed_buckets(url)
         
         if bucket_results:
@@ -239,8 +238,7 @@ def scan_single_domain_for_vulnerabilities(url):
                     # Log it but DON'T add to vulnerabilities list
                     log(f'PATH EXISTS (forbidden): {path} [{status}]', 'INFO')
         
-        # Recursive directory fuzzing
-        log(f'Starting recursive directory fuzzing on {url}', 'INFO')
+        # Recursive directory fuzzing (scanner module handles its own logging)
         discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
         
         if discovered:
