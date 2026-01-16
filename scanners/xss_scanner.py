@@ -9,7 +9,7 @@ XSS_PAYLOADS = [
     "<script>alert('XSS')</script>",
     "<img src=x onerror=alert('XSS')>",
     "<svg/onload=alert('XSS')>",
-    "'"><script>alert(String.fromCharCode(88,83,83))</script>",
+    "'\"><script>alert(String.fromCharCode(88,83,83))</script>",
     "<iframe src=javascript:alert('XSS')>",
     "<body onload=alert('XSS')>",
     "<input onfocus=alert('XSS') autofocus>",
