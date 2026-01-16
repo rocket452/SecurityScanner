@@ -6,6 +6,7 @@ import httpx
 import yaml
 import json
 import csv
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -44,7 +45,7 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
     parser.add_argument('target', help='Target domain')
-    parser.add_argument('-o', '--output', help='Output file path (default: auto-generated with timestamp)', default=None)
+    parser.add_argument('-o', '--output', help='Output file path (default: /reports/report_<target>_<timestamp>.<format>)', default=None)
     parser.add_argument('-f', '--format', choices=['json', 'html', 'markdown', 'csv'], 
                        help='Report format (default: json)', default='json')
     parser.add_argument('--no-file', action='store_true', help='Skip saving report to file (console only)')
@@ -391,11 +392,15 @@ def save_report(scan_results, target, output_file=None, format='json'):
     Returns:
         str: Path to saved report file
     """
+    # Create /reports directory if it doesn't exist
+    reports_dir = '/reports'
+    os.makedirs(reports_dir, exist_ok=True)
+    
     # Generate default filename if not provided
     if output_file is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_target = target.replace('://', '_').replace('/', '_').replace('.', '_')
-        output_file = f'report_{safe_target}_{timestamp}.{format}'
+        output_file = f'{reports_dir}/report_{safe_target}_{timestamp}.{format}'
     
     try:
         # Prepare report data
