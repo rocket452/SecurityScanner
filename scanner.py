@@ -197,6 +197,7 @@ def scan_single_domain_for_vulnerabilities(url):
         from scanners.admin_scanner import check_admin
         from scanners.backup_scanner import check_backup
         from scanners.directory_scanner import check_exposed_buckets, fuzz_directories
+        from scanners.xss_scanner import check_xss
         
         # Admin panel detection
         if check_admin(url):
@@ -207,6 +208,15 @@ def scan_single_domain_for_vulnerabilities(url):
         if check_backup(url):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high'})
             log(f'BACKUP on {url}', 'VULN')
+        
+        # XSS vulnerability detection
+        xss_vulns = check_xss(url)
+        if xss_vulns:
+            vulns.extend(xss_vulns)
+            for xss_vuln in xss_vulns:
+                severity = xss_vuln.get('severity', 'medium').upper()
+                desc = xss_vuln.get('description', 'XSS vulnerability')
+                log(f'XSS [{severity}] on {url}: {desc}', 'VULN')
         
         # Exposed buckets/storage detection (scanner module handles its own logging)
         bucket_results = check_exposed_buckets(url)
