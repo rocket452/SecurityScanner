@@ -33,6 +33,12 @@ COPY . /app
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create /reports directory for output files
+RUN mkdir -p /reports
+
+# Declare volume for reports
+VOLUME ["/reports"]
+
 # Health check
 RUN subfinder --version && amass --version && nuclei -version && ffuf -V
 

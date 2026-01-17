@@ -6,6 +6,7 @@ import httpx
 import yaml
 import json
 import csv
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -44,7 +45,7 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
     parser.add_argument('target', help='Target domain')
-    parser.add_argument('-o', '--output', help='Output file path (default: auto-generated with timestamp)', default=None)
+    parser.add_argument('-o', '--output', help='Output file path (default: /reports/report_<target>_<timestamp>.<format>)', default=None)
     parser.add_argument('-f', '--format', choices=['json', 'html', 'markdown', 'csv'], 
                        help='Report format (default: json)', default='json')
     parser.add_argument('--no-file', action='store_true', help='Skip saving report to file (console only)')
@@ -197,6 +198,7 @@ def scan_single_domain_for_vulnerabilities(url):
         from scanners.admin_scanner import check_admin
         from scanners.backup_scanner import check_backup
         from scanners.directory_scanner import check_exposed_buckets, fuzz_directories
+        from scanners.xss_scanner import check_xss
         
         # Admin panel detection
         if check_admin(url):
@@ -208,30 +210,43 @@ def scan_single_domain_for_vulnerabilities(url):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high'})
             log(f'BACKUP on {url}', 'VULN')
         
+        # XSS vulnerability detection
+        xss_vulns = check_xss(url)
+        if xss_vulns:
+            vulns.extend(xss_vulns)
+            for xss_vuln in xss_vulns:
+                severity = xss_vuln.get('severity', 'medium').upper()
+                desc = xss_vuln.get('description', 'XSS vulnerability')
+                log(f'XSS [{severity}] on {url}: {desc}', 'VULN')
+        
         # Exposed buckets/storage detection (scanner module handles its own logging)
         bucket_results = check_exposed_buckets(url)
         
         if bucket_results:
             for path, status, vuln_type in bucket_results:
+                # Construct full URL from base url and path
+                from urllib.parse import urljoin
+                full_url = urljoin(url, path)
+                
                 if vuln_type == 'DIRECTORY_LISTING':
                     vulns.append({
                         'type': 'exposed_storage',
-                        'description': f'Exposed directory listing: {path}',
+                        'description': f'Exposed directory listing: {full_url}',
                         'status_code': status,
                         'severity': 'high'
                     })
-                    log(f'BUCKET EXPOSED: {path} [{status}] - {vuln_type}', 'VULN')
+                    log(f'BUCKET EXPOSED: {full_url} [{status}] - {vuln_type}', 'VULN')
                 elif vuln_type == 'ACCESSIBLE':
                     vulns.append({
                         'type': 'accessible_path',
-                        'description': f'Accessible path: {path}',
+                        'description': f'Accessible path: {full_url}',
                         'status_code': status,
                         'severity': 'medium'
                     })
-                    log(f'ACCESSIBLE PATH: {path} [{status}]', 'VULN')
+                    log(f'ACCESSIBLE PATH: {full_url} [{status}]', 'VULN')
                 elif vuln_type == 'FORBIDDEN_BUT_EXISTS':
                     # Log it but DON'T add to vulnerabilities list
-                    log(f'PATH EXISTS (forbidden): {path} [{status}]', 'INFO')
+                    log(f'PATH EXISTS (forbidden): {full_url} [{status}]', 'INFO')
         
         # Recursive directory fuzzing (scanner module handles its own logging)
         discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
@@ -242,19 +257,25 @@ def scan_single_domain_for_vulnerabilities(url):
             for path, status in discovered:
                 # Only report 200-level and 300-level status codes as findings
                 if status.startswith('2') or status.startswith('3'):
+                    # Construct full URL
+                    from urllib.parse import urljoin
+                    full_path_url = urljoin(url, path)
+                    
                     vulns.append({
                         'type': 'discovered_path',
-                        'description': f'Discovered path: /{path}',
+                        'description': f'Discovered path: {full_path_url}',
                         'status_code': int(status),
                         'severity': 'low'
                     })
                     accessible_count += 1
                     if accessible_count <= 20:
-                        log(f'FUZZ: /{path} [{status}]', 'VULN')
+                        log(f'FUZZ: {full_path_url} [{status}]', 'VULN')
                 else:
                     # Log 403, 401 etc. but don't count as vulnerabilities
                     if accessible_count <= 20:
-                        log(f'FUZZ (blocked): /{path} [{status}]', 'INFO')
+                        from urllib.parse import urljoin
+                        full_path_url = urljoin(url, path)
+                        log(f'FUZZ (blocked): {full_path_url} [{status}]', 'INFO')
             
             if accessible_count > 20:
                 log(f'... and {accessible_count - 20} more accessible paths', 'INFO')
@@ -381,11 +402,15 @@ def save_report(scan_results, target, output_file=None, format='json'):
     Returns:
         str: Path to saved report file
     """
+    # Create /reports directory if it doesn't exist
+    reports_dir = '/reports'
+    os.makedirs(reports_dir, exist_ok=True)
+    
     # Generate default filename if not provided
     if output_file is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_target = target.replace('://', '_').replace('/', '_').replace('.', '_')
-        output_file = f'report_{safe_target}_{timestamp}.{format}'
+        output_file = f'{reports_dir}/report_{safe_target}_{timestamp}.{format}'
     
     try:
         # Prepare report data
