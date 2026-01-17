@@ -35,6 +35,26 @@ rate_limiting:
   request_delay: 0
 
 # ==============================================================================
+# OWASP ZAP CONFIGURATION
+# ==============================================================================
+# ZAP proxy settings for web application security scanning
+#
+# When running via docker-compose: use http://zap:8080 (internal docker network)
+# When running locally: use http://localhost:8080
+# ==============================================================================
+
+zap:
+  enabled: true
+  # Use 'http://zap:8080' when running in Docker, 'http://localhost:8080' when running locally
+  proxy_url: 'http://zap:8080'
+  api_key: null  # Optional, not needed if API key disabled in ZAP
+  timeout: 300   # Scan timeout in seconds
+  spider: true   # Enable web crawler
+  passive_scan: true   # Enable passive vulnerability detection
+  active_scan: false   # Enable active scanning (use with caution!)
+  max_spider_depth: 5  # Maximum crawl depth
+
+# ==============================================================================
 # API KEYS FOR ENHANCED SUBDOMAIN DISCOVERY
 # ==============================================================================
 # Add your free API keys below to significantly increase subdomain discovery.
