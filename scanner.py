@@ -120,11 +120,21 @@ def resolve_targets(args):
         else:
             log('No credentials provided - accessing public programs only', 'INFO')
         
+            # Get credentials from args or environment variables
+        h1_username = args.h1_username or os.getenv('H1_USERNAME')
+        h1_token = args.h1_token or os.getenv('H1_TOKEN')
+        
+        if h1_username and h1_token:
+            log('Using HackerOne API credentials (authenticated)', 'INFO')
+        else:
+            log('No credentials provided - accessing public programs only', 'INFO')
+        
         # Initialize fetcher with credentials
         fetcher = HackerOneAPIScopeFetcher(
             username=h1_username,
             api_token=h1_token
         )
+
         
         # Fetch program scope
         program = fetcher.get_program_by_handle(args.h1_program)
