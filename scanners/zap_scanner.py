@@ -4,24 +4,21 @@ OWASP ZAP Scanner Module
 
 Integrates ZAP vulnerability scanning with subdomain discovery tools.
 Follows hybrid approach: Use Subfinder/Amass for discovery, then ZAP for scanning.
+Uses ZAP's REST API directly (no Python library dependency).
 """
 
 import time
 import subprocess
 import json
 import os
+import requests
 from typing import List, Dict, Optional
-
-try:
-    from zapv2 import ZAPv2
-    ZAP_AVAILABLE = True
-except ImportError:
-    ZAP_AVAILABLE = False
 
 
 class ZAPScanner:
     """
     OWASP ZAP scanner wrapper that integrates with existing subdomain discovery.
+    Uses ZAP's REST API for communication.
     """
     
     def __init__(self, proxy_url='http://localhost:8080', api_key=None, timeout=300):
@@ -30,18 +27,53 @@ class ZAPScanner:
         
         Args:
             proxy_url: ZAP proxy URL (default: http://localhost:8080)
-            api_key: ZAP API key for authentication (optional)
+            api_key: ZAP API key for authentication (optional, not needed if disabled)
             timeout: Default timeout for scans in seconds
         """
-        if not ZAP_AVAILABLE:
-            raise ImportError("python-owasp-zap-v2.4 not installed. Run: pip install python-owasp-zap-v2.4")
-        
-        self.proxy_url = proxy_url
+        self.proxy_url = proxy_url.rstrip('/')
+        self.api_url = f"{self.proxy_url}"
+        self.api_key = api_key
         self.timeout = timeout
-        self.zap = ZAPv2(
-            apikey=api_key,
-            proxies={'http': proxy_url, 'https': proxy_url}
-        )
+        self.session = requests.Session()
+    
+    def _api_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
+        """
+        Make a request to ZAP's REST API.
+        
+        Args:
+            endpoint: API endpoint (e.g., '/JSON/core/view/version/')
+            params: Query parameters
+        
+        Returns:
+            API response as dictionary
+        """
+        if params is None:
+            params = {}
+        
+        if self.api_key:
+            params['apikey'] = self.api_key
+        
+        url = f"{self.api_url}{endpoint}"
+        
+        try:
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"ZAP API request failed: {e}")
+    
+    def _api_action(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
+        """
+        Make an action request to ZAP's REST API.
+        
+        Args:
+            endpoint: API endpoint for action
+            params: Query parameters
+        
+        Returns:
+            API response as dictionary
+        """
+        return self._api_request(endpoint, params)
     
     def check_zap_running(self) -> bool:
         """
@@ -51,10 +83,29 @@ class ZAPScanner:
             bool: True if ZAP is running, False otherwise
         """
         try:
-            # Try to access ZAP core API
-            version = self.zap.core.version
-            return True
+            response = self._api_request('/JSON/core/view/version/')
+            if 'version' in response:
+                print(f"[ZAP] Connected to ZAP version {response['version']}")
+                return True
+            return False
         except Exception:
+            return False
+    
+    def access_url(self, url: str) -> bool:
+        """
+        Access a URL through ZAP proxy to add it to the sites tree.
+        
+        Args:
+            url: URL to access
+        
+        Returns:
+            bool: True if successful
+        """
+        try:
+            self._api_action('/JSON/core/action/accessUrl/', {'url': url})
+            return True
+        except Exception as e:
+            print(f"[ZAP] Error accessing URL {url}: {e}")
             return False
     
     def spider_url(self, url: str, max_depth: Optional[int] = 5) -> str:
@@ -71,15 +122,25 @@ class ZAPScanner:
         print(f'[ZAP] Starting spider on: {url}')
         
         # Access the URL through ZAP
-        self.zap.urlopen(url)
+        self.access_url(url)
         time.sleep(2)
         
         # Start spider
-        scan_id = self.zap.spider.scan(url, maxdepth=max_depth)
+        params = {'url': url}
+        if max_depth:
+            params['maxDepth'] = max_depth
+        
+        response = self._api_action('/JSON/spider/action/scan/', params)
+        scan_id = response.get('scan', '')
         
         # Wait for spider to complete
-        while int(self.zap.spider.status(scan_id)) < 100:
-            progress = self.zap.spider.status(scan_id)
+        while True:
+            status_response = self._api_request('/JSON/spider/view/status/', {'scanId': scan_id})
+            progress = int(status_response.get('status', 0))
+            
+            if progress >= 100:
+                break
+            
             print(f'[ZAP] Spider progress: {progress}%')
             time.sleep(5)
         
@@ -99,17 +160,23 @@ class ZAPScanner:
         print(f'[ZAP] Running passive scan on: {url}')
         
         # Access URL to generate traffic
-        self.zap.urlopen(url)
+        self.access_url(url)
         time.sleep(3)
         
         # Wait for passive scan to complete
-        while int(self.zap.pscan.records_to_scan) > 0:
-            remaining = self.zap.pscan.records_to_scan
+        while True:
+            records_response = self._api_request('/JSON/pscan/view/recordsToScan/')
+            remaining = int(records_response.get('recordsToScan', 0))
+            
+            if remaining == 0:
+                break
+            
             print(f'[ZAP] Passive scan records remaining: {remaining}')
             time.sleep(2)
         
         # Get passive scan alerts
-        alerts = self.zap.core.alerts(baseurl=url)
+        alerts_response = self._api_request('/JSON/core/view/alerts/', {'baseurl': url})
+        alerts = alerts_response.get('alerts', [])
         print(f'[ZAP] Passive scan found {len(alerts)} alert(s)')
         
         return alerts
@@ -130,21 +197,28 @@ class ZAPScanner:
         print('[ZAP] WARNING: Active scanning will attack the target!')
         
         # Start active scan
+        params = {'url': url}
         if policy:
-            scan_id = self.zap.ascan.scan(url, scanpolicyname=policy)
-        else:
-            scan_id = self.zap.ascan.scan(url)
+            params['scanPolicyName'] = policy
+        
+        response = self._api_action('/JSON/ascan/action/scan/', params)
+        scan_id = response.get('scan', '')
         
         # Monitor progress
         start_time = time.time()
-        while int(self.zap.ascan.status(scan_id)) < 100:
+        while True:
             elapsed = time.time() - start_time
             if elapsed > self.timeout:
                 print(f'[ZAP] Active scan timeout after {self.timeout}s')
-                self.zap.ascan.stop(scan_id)
+                self._api_action('/JSON/ascan/action/stop/', {'scanId': scan_id})
                 break
             
-            progress = self.zap.ascan.status(scan_id)
+            status_response = self._api_request('/JSON/ascan/view/status/', {'scanId': scan_id})
+            progress = int(status_response.get('status', 0))
+            
+            if progress >= 100:
+                break
+            
             print(f'[ZAP] Active scan progress: {progress}%')
             time.sleep(10)
         
@@ -162,10 +236,12 @@ class ZAPScanner:
         Returns:
             List of vulnerability alerts
         """
+        params = {}
         if url:
-            alerts = self.zap.core.alerts(baseurl=url)
-        else:
-            alerts = self.zap.core.alerts()
+            params['baseurl'] = url
+        
+        response = self._api_request('/JSON/core/view/alerts/', params)
+        alerts = response.get('alerts', [])
         
         # Filter by risk level if specified
         if risk:
@@ -196,7 +272,7 @@ class ZAPScanner:
             
             try:
                 # Add to ZAP context
-                self.zap.urlopen(subdomain)
+                self.access_url(subdomain)
                 time.sleep(1)
                 
                 # Spider the subdomain
@@ -237,20 +313,29 @@ class ZAPScanner:
         try:
             print(f'[ZAP] Generating {format.upper()} report: {output_path}')
             
-            if format.lower() == 'html':
-                report_data = self.zap.core.htmlreport()
-            elif format.lower() == 'json':
-                report_data = self.zap.core.jsonreport()
-            elif format.lower() == 'xml':
-                report_data = self.zap.core.xmlreport()
-            elif format.lower() == 'md':
-                report_data = self.zap.core.mdreport()
-            else:
+            endpoint_map = {
+                'html': '/OTHER/core/other/htmlreport/',
+                'json': '/OTHER/core/other/jsonreport/',
+                'xml': '/OTHER/core/other/xmlreport/',
+                'md': '/OTHER/core/other/mdreport/'
+            }
+            
+            endpoint = endpoint_map.get(format.lower())
+            if not endpoint:
                 print(f'[ZAP] Unsupported format: {format}')
                 return False
             
-            with open(output_path, 'w') as f:
-                f.write(report_data)
+            # Get report data
+            url = f"{self.api_url}{endpoint}"
+            params = {}
+            if self.api_key:
+                params['apikey'] = self.api_key
+            
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(response.text)
             
             print(f'[ZAP] Report saved to: {output_path}')
             return True
@@ -305,7 +390,7 @@ def check_zap_docker() -> bool:
     try:
         # Check if ZAP container is running
         result = subprocess.run(
-            ['docker', 'ps', '--filter', 'ancestor=zaproxy/zap-stable', '--format', '{{.Names}}'],
+            ['docker', 'ps', '--filter', 'name=securityscanner-zap', '--format', '{{.Names}}'],
             capture_output=True,
             text=True,
             timeout=10
@@ -315,7 +400,7 @@ def check_zap_docker() -> bool:
             print('[ZAP] ZAP Docker container is running')
             return True
         
-        print('[ZAP] ZAP not running. Start with: docker run -u zap -p 8080:8080 -d zaproxy/zap-stable zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.disablekey=true')
+        print('[ZAP] ZAP not running. Start with: docker-compose up -d zap')
         return False
         
     except FileNotFoundError:
@@ -328,20 +413,14 @@ def check_zap_docker() -> bool:
 
 if __name__ == '__main__':
     # Test ZAP scanner
-    print('Testing ZAP Scanner Module')
+    print('Testing ZAP Scanner Module (REST API version)')
     
-    if not ZAP_AVAILABLE:
-        print('ERROR: python-owasp-zap-v2.4 not installed')
-        print('Install with: pip install python-owasp-zap-v2.4')
-    else:
-        print('ZAP library is available')
-        
-        # Check if ZAP is running
-        if check_zap_docker():
-            scanner = ZAPScanner()
-            if scanner.check_zap_running():
-                print('✅ ZAP is accessible and ready!')
-            else:
-                print('❌ ZAP is not accessible')
+    # Check if ZAP is running
+    if check_zap_docker():
+        scanner = ZAPScanner()
+        if scanner.check_zap_running():
+            print('✅ ZAP is accessible and ready!')
         else:
-            print('⚠️  Start ZAP Docker container first')
+            print('❌ ZAP is not accessible')
+    else:
+        print('⚠️  Start ZAP with: docker-compose up -d zap')
