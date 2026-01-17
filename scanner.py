@@ -22,6 +22,16 @@ def load_config():
                 'nuclei_rate_limit': 150,
                 'nuclei_concurrency': 25,
                 'http_timeout': 10
+            },
+            'zap': {
+                'enabled': False,
+                'proxy_url': 'http://localhost:8080',
+                'api_key': None,
+                'timeout': 300,
+                'spider': True,
+                'passive_scan': True,
+                'active_scan': False,
+                'max_spider_depth': 5
             }
         }
 
@@ -38,62 +48,171 @@ ALL_SUBDOMAINS = []
 def main():
     """
     Main entry point for the security scanner.
+    Clean and simple: discover -> scan -> deduplicate -> report.
     """
-    global SCAN_START_TIME, ALL_SUBDOMAINS
+    global SCAN_START_TIME
     SCAN_START_TIME = datetime.now()
     
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Security Scanner with Nuclei Integration')
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Print header
+    print_header(args.target)
+    
+    # Step 1: Discover all subdomains
+    subdomains = discover_all_subdomains(args.target)
+    
+    # Step 2: Run all vulnerability scans
+    scan_results = run_all_scans(subdomains, args)
+    
+    # Step 3: Deduplicate findings
+    from scanners.deduplicator import deduplicate_scan_results
+    scan_results = deduplicate_scan_results(scan_results)
+    
+    # Step 4: Generate and save reports
+    generate_reports(scan_results, args)
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Security Scanner with ZAP and Nuclei Integration')
     parser.add_argument('target', help='Target domain')
     parser.add_argument('-o', '--output', help='Output file path (default: /reports/report_<target>_<timestamp>.<format>)', default=None)
     parser.add_argument('-f', '--format', choices=['json', 'html', 'markdown', 'csv'], 
                        help='Report format (default: json)', default='json')
     parser.add_argument('--no-file', action='store_true', help='Skip saving report to file (console only)')
-    args = parser.parse_args()
     
-    target_url = args.target
+    # ZAP integration options
+    parser.add_argument('--zap', action='store_true', help='Enable OWASP ZAP scanning')
+    parser.add_argument('--zap-active', action='store_true', help='Enable ZAP active scanning (requires permission!)')
+    parser.add_argument('--zap-proxy', default=None, help='ZAP proxy URL (default: http://localhost:8080)')
+    parser.add_argument('--zap-timeout', type=int, default=None, help='ZAP scan timeout in seconds (default: 300)')
+    parser.add_argument('--zap-only', action='store_true', help='Run only ZAP scans (skip other vulnerability scanners)')
+    parser.add_argument('--skip-nuclei', action='store_true', help='Skip Nuclei scanning')
     
-    # Print header
-    print(f'\n🔍 {target_url}')
+    return parser.parse_args()
+
+def print_header(target):
+    """Print scan header with target information."""
+    print(f'\n🔍 {target}')
     print('=' * 60)
-    
-    # Log rate limiting settings
     rate_limits = CONFIG.get('rate_limiting', {})
     log(f'Rate limiting: ffuf={rate_limits.get("ffuf_threads", 20)} threads, '
         f'nuclei={rate_limits.get("nuclei_rate_limit", 150)}/min, '
         f'concurrency={rate_limits.get("nuclei_concurrency", 25)}', 'INFO')
+
+# ============================================================================
+# STEP 1: SUBDOMAIN DISCOVERY
+# ============================================================================
+
+def discover_all_subdomains(target):
+    """
+    Discover all subdomains using multiple tools.
+    Returns a deduplicated list of all discovered subdomains including the base domain.
+    """
+    global ALL_SUBDOMAINS
     
-    # Initialize an empty list for subdomains
-    sub_domains = []
+    subdomains = []
     
-    # Add domains from Subfinder
-    sub_domains.extend(retrieve_sub_domains_from_subfinder(target_url))
-    
-    # Add domains from Amass
-    sub_domains.extend(retrieve_sub_domains_from_amass(target_url))
+    # Run discovery tools
+    subdomains.extend(retrieve_sub_domains_from_subfinder(target))
+    subdomains.extend(retrieve_sub_domains_from_amass(target))
     
     # Always include the base domain
-    sub_domains.append(target_url)
-    log(f'Including base domain in scan: {target_url}', 'INFO')
+    subdomains.append(target)
+    log(f'Including base domain in scan: {target}', 'INFO')
     
-    # Deduplicate the domains
-    sub_domains = deduplicate_domains(sub_domains)
-    ALL_SUBDOMAINS = sub_domains
+    # Deduplicate
+    subdomains = deduplicate_domains(subdomains)
+    ALL_SUBDOMAINS = subdomains
     
-    # Print summary of domains to scan
-    print_scan_summary(sub_domains, target_url)
+    # Print summary
+    print_scan_summary(subdomains, target)
     
-    # Scan domains for vulnerabilities
-    scan_results = scan_domains_for_vulnerabilities(sub_domains)
+    return subdomains
+
+# ============================================================================
+# STEP 2: VULNERABILITY SCANNING
+# ============================================================================
+
+def run_all_scans(subdomains, args):
+    """
+    Run all enabled vulnerability scans on discovered subdomains.
+    Returns combined scan results from all scanners.
+    """
+    # Probe for live domains
+    live_domains = probe_live_domains(subdomains)
     
-    # Print vulnerability report to console
+    # Initialize results
+    all_results = {}
+    
+    # Run ZAP scanning if enabled
+    if args.zap or CONFIG.get('zap', {}).get('enabled', False):
+        log('ZAP scanning enabled', 'INFO')
+        zap_results = run_zap_scans(live_domains, args)
+        all_results.update(zap_results)
+    
+    # Run traditional vulnerability scans unless --zap-only is specified
+    if not args.zap_only:
+        traditional_results = run_traditional_scans(live_domains, skip_nuclei=args.skip_nuclei)
+        
+        # Merge with ZAP results
+        for url, vulns in traditional_results:
+            if url in all_results:
+                all_results[url].extend(vulns)
+            else:
+                all_results[url] = vulns
+    
+    # Convert dict to list of tuples for reporting
+    scan_results = [(url, vulns) for url, vulns in all_results.items()]
+    
+    return scan_results
+
+def run_traditional_scans(live_domains, skip_nuclei=False):
+    """
+    Run traditional vulnerability scanners on live domains.
+    """
+    scan_results = []
+    for url, is_live, status_code in live_domains:
+        if is_live:
+            vulns = scan_single_domain_for_vulnerabilities(url, skip_nuclei=skip_nuclei)
+            scan_results.append((url, vulns))
+    
+    return scan_results
+
+# ============================================================================
+# STEP 3: REPORT GENERATION
+# ============================================================================
+
+def generate_reports(scan_results, args):
+    """
+    Generate and save all reports.
+    Prints to console and optionally saves to file.
+    """
+    # Print to console
     print_vulnerability_report(scan_results)
     
-    # Save report to file if not disabled
+    # Save to file if not disabled
     if not args.no_file:
-        output_file = save_report(scan_results, target_url, args.output, args.format)
+        output_file = save_report(scan_results, args.target, args.output, args.format)
         if output_file:
             log(f'Report saved to: {output_file}', 'INFO')
+        
+        # Generate ZAP-specific report if ZAP was used
+        if args.zap and scan_results:
+            generate_zap_report(output_file, args)
+
+def generate_zap_report(output_file, args):
+    """Generate ZAP-specific HTML report."""
+    try:
+        from scanners.zap_scanner import ZAPScanner
+        zap_proxy = args.zap_proxy or CONFIG.get('zap', {}).get('proxy_url', 'http://localhost:8080')
+        scanner = ZAPScanner(proxy_url=zap_proxy)
+        
+        zap_report_path = output_file.replace(f'.{args.format}', '_zap.html')
+        if scanner.generate_report(zap_report_path, format='html'):
+            log(f'ZAP report saved to: {zap_report_path}', 'INFO')
+    except Exception as e:
+        log(f'Could not generate ZAP report: {e}', 'WARN')
 
 # ============================================================================
 # LOGGING UTILITIES
@@ -184,10 +303,96 @@ def deduplicate_domains(domains):
     return unique_domains
 
 # ============================================================================
+# ZAP INTEGRATION
+# ============================================================================
+
+def run_zap_scans(live_domains, args):
+    """
+    Run OWASP ZAP scans on discovered subdomains.
+    
+    Args:
+        live_domains: List of (url, is_live, status_code) tuples
+        args: Command line arguments
+    
+    Returns:
+        Dict mapping URLs to their ZAP vulnerabilities
+    """
+    try:
+        from scanners.zap_scanner import ZAPScanner, check_zap_docker
+    except ImportError:
+        log('ZAP scanner module not found', 'ERROR')
+        return {}
+    
+    # Get ZAP configuration
+    zap_config = CONFIG.get('zap', {})
+    zap_proxy = args.zap_proxy or zap_config.get('proxy_url', 'http://localhost:8080')
+    zap_timeout = args.zap_timeout or zap_config.get('timeout', 300)
+    zap_api_key = zap_config.get('api_key')
+    
+    # Check if ZAP is running
+    log(f'Checking ZAP at {zap_proxy}...', 'INFO')
+    
+    try:
+        scanner = ZAPScanner(proxy_url=zap_proxy, api_key=zap_api_key, timeout=zap_timeout)
+        
+        if not scanner.check_zap_running():
+            log('ZAP is not accessible. Starting ZAP...', 'WARN')
+            if not check_zap_docker():
+                log('ZAP could not be started. Run manually: docker run -u zap -p 8080:8080 -d zaproxy/zap-stable zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.disablekey=true', 'ERROR')
+                return {}
+    except Exception as e:
+        log(f'Error connecting to ZAP: {e}', 'ERROR')
+        return {}
+    
+    log('✅ ZAP is running and accessible', 'OK')
+    
+    # Prepare list of URLs to scan
+    urls_to_scan = [url for url, is_live, _ in live_domains if is_live]
+    
+    if not urls_to_scan:
+        log('No live domains to scan with ZAP', 'WARN')
+        return {}
+    
+    log(f'Scanning {len(urls_to_scan)} domain(s) with ZAP', 'INFO')
+    
+    # Determine scan options
+    spider_enabled = zap_config.get('spider', True)
+    passive_enabled = zap_config.get('passive_scan', True)
+    active_enabled = args.zap_active or zap_config.get('active_scan', False)
+    
+    if active_enabled:
+        log('⚠️ ACTIVE SCANNING ENABLED - Only use on authorized targets!', 'WARN')
+    
+    # Run ZAP scans
+    try:
+        results = scanner.scan_subdomain_list(
+            urls_to_scan,
+            spider=spider_enabled,
+            passive=passive_enabled,
+            active=active_enabled
+        )
+        
+        # Convert ZAP alerts to vulnerability format
+        zap_vulns = {}
+        for url, alerts in results.items():
+            vulns = scanner.parse_alerts_to_vulns(alerts)
+            zap_vulns[url] = vulns
+            
+            # Log summary
+            if vulns:
+                log(f'ZAP found {len(vulns)} vulnerability(ies) on {url}', 'OK')
+        
+        return zap_vulns
+        
+    except Exception as e:
+        log(f'Error during ZAP scanning: {e}', 'ERROR')
+        return {}
+
+# ============================================================================
 # VULNERABILITY SCANNING
 # ============================================================================
 
-def scan_single_domain_for_vulnerabilities(url):
+def scan_single_domain_for_vulnerabilities(url, skip_nuclei=False):
     """
     Perform comprehensive vulnerability scanning on a single URL.
     """
@@ -202,17 +407,19 @@ def scan_single_domain_for_vulnerabilities(url):
         
         # Admin panel detection
         if check_admin(url):
-            vulns.append({'type': 'admin_panel', 'description': 'Admin panel exposed', 'severity': 'medium'})
+            vulns.append({'type': 'admin_panel', 'description': 'Admin panel exposed', 'severity': 'medium', 'url': url})
             log(f'ADMIN on {url}', 'VULN')
         
         # Backup file detection
         if check_backup(url):
-            vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high'})
+            vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
             log(f'BACKUP on {url}', 'VULN')
         
         # XSS vulnerability detection
         xss_vulns = check_xss(url)
         if xss_vulns:
+            for xss_vuln in xss_vulns:
+                xss_vuln['url'] = url
             vulns.extend(xss_vulns)
             for xss_vuln in xss_vulns:
                 severity = xss_vuln.get('severity', 'medium').upper()
@@ -233,7 +440,8 @@ def scan_single_domain_for_vulnerabilities(url):
                         'type': 'exposed_storage',
                         'description': f'Exposed directory listing: {full_url}',
                         'status_code': status,
-                        'severity': 'high'
+                        'severity': 'high',
+                        'url': url
                     })
                     log(f'BUCKET EXPOSED: {full_url} [{status}] - {vuln_type}', 'VULN')
                 elif vuln_type == 'ACCESSIBLE':
@@ -241,7 +449,8 @@ def scan_single_domain_for_vulnerabilities(url):
                         'type': 'accessible_path',
                         'description': f'Accessible path: {full_url}',
                         'status_code': status,
-                        'severity': 'medium'
+                        'severity': 'medium',
+                        'url': url
                     })
                     log(f'ACCESSIBLE PATH: {full_url} [{status}]', 'VULN')
                 elif vuln_type == 'FORBIDDEN_BUT_EXISTS':
@@ -265,7 +474,8 @@ def scan_single_domain_for_vulnerabilities(url):
                         'type': 'discovered_path',
                         'description': f'Discovered path: {full_path_url}',
                         'status_code': int(status),
-                        'severity': 'low'
+                        'severity': 'low',
+                        'url': url
                     })
                     accessible_count += 1
                     if accessible_count <= 20:
@@ -282,39 +492,43 @@ def scan_single_domain_for_vulnerabilities(url):
         else:
             log('No paths discovered via recursive fuzzing', 'INFO')
         
-        # Nuclei vulnerability scanning with rate limiting
-        log(f'Running Nuclei on {url}', 'INFO')
-        
-        # Get rate limiting settings from config
-        nuclei_rate_limit = CONFIG.get('rate_limiting', {}).get('nuclei_rate_limit', 150)
-        nuclei_concurrency = CONFIG.get('rate_limiting', {}).get('nuclei_concurrency', 25)
-        
-        result = subprocess.run([
-            'nuclei',
-            '-u', url,
-            '-silent',
-            '-nc',  # No color
-            '-severity', 'critical,high,medium',
-            '-rate-limit', str(nuclei_rate_limit),  # Requests per minute
-            '-c', str(nuclei_concurrency)  # Concurrent templates
-        ], capture_output=True, text=True, timeout=180)
-        
-        if result.stdout.strip():
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    # Parse Nuclei output for severity
-                    severity = 'medium'
-                    if 'critical' in line.lower():
-                        severity = 'critical'
-                    elif 'high' in line.lower():
-                        severity = 'high'
-                    
-                    vulns.append({
-                        'type': 'nuclei',
-                        'description': line.strip(),
-                        'severity': severity
-                    })
-                    log(f'NUCLEI: {line.strip()}', 'VULN')
+        # Nuclei vulnerability scanning with rate limiting (skip if requested)
+        if not skip_nuclei:
+            log(f'Running Nuclei on {url}', 'INFO')
+            
+            # Get rate limiting settings from config
+            nuclei_rate_limit = CONFIG.get('rate_limiting', {}).get('nuclei_rate_limit', 150)
+            nuclei_concurrency = CONFIG.get('rate_limiting', {}).get('nuclei_concurrency', 25)
+            
+            result = subprocess.run([
+                'nuclei',
+                '-u', url,
+                '-silent',
+                '-nc',  # No color
+                '-severity', 'critical,high,medium',
+                '-rate-limit', str(nuclei_rate_limit),  # Requests per minute
+                '-c', str(nuclei_concurrency)  # Concurrent templates
+            ], capture_output=True, text=True, timeout=180)
+            
+            if result.stdout.strip():
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        # Parse Nuclei output for severity
+                        severity = 'medium'
+                        if 'critical' in line.lower():
+                            severity = 'critical'
+                        elif 'high' in line.lower():
+                            severity = 'high'
+                        
+                        vulns.append({
+                            'type': 'nuclei',
+                            'description': line.strip(),
+                            'severity': severity,
+                            'url': url
+                        })
+                        log(f'NUCLEI: {line.strip()}', 'VULN')
+        else:
+            log(f'Skipping Nuclei scan on {url}', 'INFO')
                     
     except subprocess.TimeoutExpired:
         log('Nuclei timeout', 'WARN')
@@ -349,19 +563,6 @@ def probe_live_domains(domains):
     
     return live_domains
 
-def scan_domains_for_vulnerabilities(domains):
-    """
-    Main vulnerability scanning function.
-    """
-    live_domains = probe_live_domains(domains)
-    scan_results = []
-    for url, is_live, status_code in live_domains:
-        if is_live:
-            vulns = scan_single_domain_for_vulnerabilities(url)
-            scan_results.append((url, vulns))
-    
-    return scan_results
-
 # ============================================================================
 # REPORTING
 # ============================================================================
@@ -375,7 +576,11 @@ def print_vulnerability_report(scan_results):
             has_vulns = True
             for vuln in vulns:
                 desc = vuln.get('description', str(vuln))
-                print(f'{url}: {desc}')
+                sources = vuln.get('sources', [])
+                if sources:
+                    print(f'{url}: {desc} [Detected by: {", ".join(sources)}]')
+                else:
+                    print(f'{url}: {desc}')
     
     if not has_vulns:
         print('No vulnerabilities detected.')
@@ -521,6 +726,13 @@ def save_html_report(report_data, output_file):
         .severity.high {{ background: #fd7e14; color: white; }}
         .severity.medium {{ background: #ffc107; color: black; }}
         .severity.low {{ background: #28a745; color: white; }}
+        .severity.info {{ background: #17a2b8; color: white; }}
+        .sources {{
+            display: inline-block;
+            font-size: 11px;
+            color: #666;
+            margin-left: 10px;
+        }}
         .no-vulns {{
             background: white;
             padding: 40px;
@@ -564,9 +776,12 @@ def save_html_report(report_data, output_file):
                     severity = vuln.get('severity', 'low')
                     desc = vuln.get('description', 'No description')
                     vuln_type = vuln.get('type', 'unknown')
+                    sources = vuln.get('sources', [])
+                    sources_html = f'<span class="sources">Detected by: {", ".join(sources)}</span>' if sources else ''
                     html += f'''        <div class="vuln-item">
             <span class="severity {severity}">{severity}</span>
             <strong>{vuln_type.replace('_', ' ').title()}:</strong> {desc}
+            {sources_html}
         </div>
 '''
                 html += '    </div>\n'
@@ -602,7 +817,9 @@ def save_markdown_report(report_data, output_file):
                     severity = vuln.get('severity', 'low').upper()
                     desc = vuln.get('description', 'No description')
                     vuln_type = vuln.get('type', 'unknown').replace('_', ' ').title()
-                    md += f"- **[{severity}]** {vuln_type}: {desc}\n"
+                    sources = vuln.get('sources', [])
+                    sources_text = f" (Detected by: {', '.join(sources)})" if sources else ''
+                    md += f"- **[{severity}]** {vuln_type}: {desc}{sources_text}\n"
                 
                 md += '\n'
     
@@ -613,17 +830,19 @@ def save_csv_report(report_data, output_file):
     """Save report in CSV format."""
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Target', 'URL', 'Vulnerability Type', 'Description', 'Severity', 'Status Code'])
+        writer.writerow(['Target', 'URL', 'Vulnerability Type', 'Description', 'Severity', 'Status Code', 'Sources'])
         
         for result in report_data['results']:
             for vuln in result['vulnerabilities']:
+                sources = ', '.join(vuln.get('sources', []))
                 writer.writerow([
                     report_data['target'],
                     result['url'],
                     vuln.get('type', 'unknown'),
                     vuln.get('description', ''),
                     vuln.get('severity', 'low'),
-                    vuln.get('status_code', '')
+                    vuln.get('status_code', ''),
+                    sources
                 ])
 
 # ============================================================================

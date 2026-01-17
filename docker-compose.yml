@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  # OWASP ZAP Scanner - runs as a daemon service
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: securityscanner-zap
+    ports:
+      - "8080:8080"
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.disablekey=true
+    networks:
+      - scanner-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Security Scanner Application
+  scanner:
+    build: .
+    container_name: securityscanner-app
+    volumes:
+      - ./reports:/reports
+      - ./config.yaml:/app/config.yaml
+    depends_on:
+      zap:
+        condition: service_healthy
+    environment:
+      # Override ZAP proxy URL for Docker network
+      - ZAP_PROXY_URL=http://zap:8080
+    networks:
+      - scanner-network
+    # Remove tail command - let scanner run via docker-compose run
+
+networks:
+  scanner-network:
+    driver: bridge
