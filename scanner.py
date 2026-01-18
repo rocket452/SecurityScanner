@@ -9,6 +9,10 @@ import csv
 import os
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Load configuration
 def load_config():
