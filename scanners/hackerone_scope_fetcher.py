@@ -135,14 +135,22 @@ class HackerOneAPIScopeFetcher:
         
         try:
             print(f"[*] Fetching structured scopes from API with authentication...")
+            print(f"[DEBUG] API URL: {url}")
+            print(f"[DEBUG] Auth user: {self.username}")
+            
             response = self.session.get(url, timeout=30)
+            
+            print(f"[DEBUG] Response status: {response.status_code}")
+            print(f"[DEBUG] Response headers: {dict(response.headers)}")
             
             if response.status_code == 404:
                 print(f"[!] Program '{handle}' not found or not accessible")
+                print(f"[DEBUG] Response text: {response.text[:500]}")
                 return None
             
             if response.status_code == 401:
                 print("[!] Authentication failed - check your API credentials")
+                print(f"[DEBUG] Response text: {response.text[:500]}")
                 return None
             
             response.raise_for_status()
@@ -185,12 +193,26 @@ class HackerOneAPIScopeFetcher:
         
         try:
             print(f"[*] Fetching from public directory...")
+            print(f"[DEBUG] Directory URL: {url}")
+            
             response = requests.get(url, timeout=10)
             
+            print(f"[DEBUG] Response status: {response.status_code}")
+            print(f"[DEBUG] Response content type: {response.headers.get('content-type', 'unknown')}")
+            
             if response.status_code == 404:
+                print(f"[!] Program '{handle}' not found in public directory")
                 return None
             
             response.raise_for_status()
+            
+            # Check if response is actually JSON
+            content_type = response.headers.get('content-type', '')
+            if 'json' not in content_type.lower():
+                print(f"[!] Expected JSON but got: {content_type}")
+                print(f"[DEBUG] Response text preview: {response.text[:200]}")
+                return None
+            
             data = response.json()
             
             assets = []
@@ -213,6 +235,10 @@ class HackerOneAPIScopeFetcher:
                 assets=assets
             )
             
+        except json.JSONDecodeError as e:
+            print(f"[!] Failed to parse JSON from directory: {str(e)}")
+            print(f"[DEBUG] Response text: {response.text[:500]}")
+            return None
         except requests.RequestException as e:
             print(f"[!] Failed to fetch from directory: {str(e)}")
             return None
