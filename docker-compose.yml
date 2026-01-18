@@ -37,7 +37,11 @@ services:
       - H1_TOKEN=${H1_TOKEN:-}
     networks:
       - scanner-network
-    # Remove tail command - let scanner run via docker-compose run
+    # Default command can be overridden with: docker-compose run scanner <args>
+    # Examples:
+    #   docker-compose run scanner example.com
+    #   docker-compose run scanner --fetch-scope --h1-program shopify
+    #   docker-compose run scanner --fetch-scope --h1-program github --zap
 
 networks:
   scanner-network:
