@@ -95,16 +95,17 @@ class HackerOneAPIScopeFetcher:
     
     def _generate_curl_command(self, url: str, method: str = "GET") -> str:
         """Generate curl command for debugging."""
-        curl_cmd = f"curl -X {method} \\
-  '{url}' \\"
+        lines = []
+        lines.append(f"curl -X {method}")
+        lines.append(f"  '{url}'")
         
         if self.username and self.api_token:
             # Show username but mask token
             masked_token = self.api_token[:4] + "*" * (len(self.api_token) - 8) + self.api_token[-4:] if len(self.api_token) > 8 else "****"
-            curl_cmd += f"\n  -u '{self.username}:{masked_token}' \\"
+            lines.append(f"  -u '{self.username}:{masked_token}'")
         
-        curl_cmd += "\n  -H 'Accept: application/json'"
-        return curl_cmd
+        lines.append("  -H 'Accept: application/json'")
+        return " \\\n".join(lines)
     
     def get_program_by_handle(self, handle: str) -> Optional[Program]:
         """
