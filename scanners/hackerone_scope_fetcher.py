@@ -69,12 +69,11 @@ class Program:
 
 class HackerOneAPIScopeFetcher:
     """
-    Fetches scope from HackerOne using their GraphQL API.
+    Fetches scope from HackerOne using their REST API.
     Requires authentication for private programs.
     """
     
     BASE_URL = "https://api.hackerone.com/v1"
-    GRAPHQL_URL = "https://hackerone.com/graphql"
     
     def __init__(self, username: Optional[str] = None, api_token: Optional[str] = None):
         """
@@ -91,8 +90,7 @@ class HackerOneAPIScopeFetcher:
         if username and api_token:
             self.session.auth = (username, api_token)
             self.session.headers.update({
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
+                'Accept': 'application/json'
             })
     
     def get_program_by_handle(self, handle: str) -> Optional[Program]:
@@ -106,21 +104,77 @@ class HackerOneAPIScopeFetcher:
             Program object with assets, or None if not found
         """
         try:
-            # Try public directory first
+            # Try authenticated structured_scopes API if credentials provided
+            if self.username and self.api_token:
+                program = self._fetch_structured_scopes(handle)
+                if program:
+                    return program
+            
+            # Fall back to public directory
             program = self._fetch_from_directory(handle)
             if program:
                 return program
             
-            # Fall back to authenticated API if credentials provided
-            if self.username and self.api_token:
-                return self._fetch_from_api(handle)
-            
-            print(f"[!] Program '{handle}' not found in public directory")
-            print("[!] Provide API credentials to access private programs")
+            print(f"[!] Program '{handle}' not found")
+            if not (self.username and self.api_token):
+                print("[!] Provide API credentials to access private programs and structured scopes")
             return None
             
         except Exception as e:
             print(f"[!] Error fetching program '{handle}': {str(e)}")
+            return None
+    
+    def _fetch_structured_scopes(self, handle: str) -> Optional[Program]:
+        """
+        Fetch structured scopes from authenticated HackerOne API.
+        This is the preferred method when credentials are available.
+        
+        Endpoint: /v1/hackers/programs/{handle}/structured_scopes
+        """
+        url = f"{self.BASE_URL}/hackers/programs/{handle}/structured_scopes"
+        
+        try:
+            print(f"[*] Fetching structured scopes from API with authentication...")
+            response = self.session.get(url, timeout=30)
+            
+            if response.status_code == 404:
+                print(f"[!] Program '{handle}' not found or not accessible")
+                return None
+            
+            if response.status_code == 401:
+                print("[!] Authentication failed - check your API credentials")
+                return None
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Parse structured scopes response
+            assets = []
+            scopes_data = data.get('data', [])
+            
+            for scope in scopes_data:
+                scope_attrs = scope.get('attributes', {})
+                
+                asset = Asset(
+                    identifier=scope_attrs.get('asset_identifier', ''),
+                    asset_type=scope_attrs.get('asset_type', 'OTHER'),
+                    eligible_for_bounty=scope_attrs.get('eligible_for_bounty', False),
+                    eligible_for_submission=scope_attrs.get('eligible_for_submission', True),
+                    instruction=scope_attrs.get('instruction'),
+                    max_severity=scope_attrs.get('max_severity')
+                )
+                assets.append(asset)
+            
+            print(f"[+] Successfully fetched {len(assets)} structured scopes")
+            
+            return Program(
+                handle=handle,
+                name=handle.title(),
+                assets=assets
+            )
+            
+        except requests.RequestException as e:
+            print(f"[!] API request failed: {str(e)}")
             return None
     
     def _fetch_from_directory(self, handle: str) -> Optional[Program]:
@@ -130,6 +184,7 @@ class HackerOneAPIScopeFetcher:
         url = f"https://hackerone.com/{handle}/policy_scopes.json"
         
         try:
+            print(f"[*] Fetching from public directory...")
             response = requests.get(url, timeout=10)
             
             if response.status_code == 404:
@@ -150,6 +205,8 @@ class HackerOneAPIScopeFetcher:
                 )
                 assets.append(asset)
             
+            print(f"[+] Successfully fetched {len(assets)} scopes from public directory")
+            
             return Program(
                 handle=handle,
                 name=handle.title(),
@@ -158,47 +215,6 @@ class HackerOneAPIScopeFetcher:
             
         except requests.RequestException as e:
             print(f"[!] Failed to fetch from directory: {str(e)}")
-            return None
-    
-    def _fetch_from_api(self, handle: str) -> Optional[Program]:
-        """
-        Fetch from authenticated HackerOne API (requires credentials).
-        """
-        url = f"{self.BASE_URL}/hackers/programs/{handle}"
-        
-        try:
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            program_data = data.get('data', {})
-            attributes = program_data.get('attributes', {})
-            
-            # Extract structured scopes
-            assets = []
-            structured_scopes = attributes.get('structured_scopes', {}).get('data', [])
-            
-            for scope in structured_scopes:
-                scope_attrs = scope.get('attributes', {})
-                
-                asset = Asset(
-                    identifier=scope_attrs.get('asset_identifier', ''),
-                    asset_type=scope_attrs.get('asset_type', 'OTHER'),
-                    eligible_for_bounty=scope_attrs.get('eligible_for_bounty', False),
-                    eligible_for_submission=scope_attrs.get('eligible_for_submission', True),
-                    instruction=scope_attrs.get('instruction'),
-                    max_severity=scope_attrs.get('max_severity')
-                )
-                assets.append(asset)
-            
-            return Program(
-                handle=handle,
-                name=attributes.get('name', handle),
-                assets=assets
-            )
-            
-        except requests.RequestException as e:
-            print(f"[!] API request failed: {str(e)}")
             return None
 
 
@@ -424,6 +440,11 @@ class ScopeExporter:
 # CLI Interface (if run directly)
 if __name__ == "__main__":
     import argparse
+    import os
+    from dotenv import load_dotenv
+    
+    # Load environment variables from .env file
+    load_dotenv()
     
     parser = argparse.ArgumentParser(
         description="Fetch HackerOne bug bounty program scope"
@@ -434,11 +455,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '--username',
-        help='HackerOne username (for private programs)'
+        help='HackerOne username (or set H1_USERNAME in .env)'
     )
     parser.add_argument(
         '--token',
-        help='HackerOne API token (for private programs)'
+        help='HackerOne API token (or set H1_TOKEN in .env)'
     )
     parser.add_argument(
         '--filter',
@@ -457,10 +478,19 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
+    # Get credentials from args or environment
+    username = args.username or os.getenv('H1_USERNAME')
+    token = args.token or os.getenv('H1_TOKEN')
+    
+    if username and token:
+        print(f"[+] Using HackerOne API credentials for user: {username}")
+    else:
+        print("[*] No credentials provided - accessing public programs only")
+    
     # Initialize fetcher
     fetcher = HackerOneAPIScopeFetcher(
-        username=args.username,
-        api_token=args.token
+        username=username,
+        api_token=token
     )
     
     # Fetch program
