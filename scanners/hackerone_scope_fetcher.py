@@ -93,6 +93,19 @@ class HackerOneAPIScopeFetcher:
                 'Accept': 'application/json'
             })
     
+    def _generate_curl_command(self, url: str, method: str = "GET") -> str:
+        """Generate curl command for debugging."""
+        curl_cmd = f"curl -X {method} \\
+  '{url}' \\"
+        
+        if self.username and self.api_token:
+            # Show username but mask token
+            masked_token = self.api_token[:4] + "*" * (len(self.api_token) - 8) + self.api_token[-4:] if len(self.api_token) > 8 else "****"
+            curl_cmd += f"\n  -u '{self.username}:{masked_token}' \\"
+        
+        curl_cmd += "\n  -H 'Accept: application/json'"
+        return curl_cmd
+    
     def get_program_by_handle(self, handle: str) -> Optional[Program]:
         """
         Fetch program details and scope by program handle.
@@ -138,6 +151,12 @@ class HackerOneAPIScopeFetcher:
             print(f"[DEBUG] API URL: {url}")
             print(f"[DEBUG] Auth user: {self.username}")
             
+            # Show curl command for debugging
+            curl_cmd = self._generate_curl_command(url)
+            print(f"\n[DEBUG] Equivalent curl command:")
+            print(curl_cmd)
+            print()
+            
             response = self.session.get(url, timeout=30)
             
             print(f"[DEBUG] Response status: {response.status_code}")
@@ -151,6 +170,10 @@ class HackerOneAPIScopeFetcher:
             if response.status_code == 401:
                 print("[!] Authentication failed - check your API credentials")
                 print(f"[DEBUG] Response text: {response.text[:500]}")
+                print("\n[HINT] Check that:")
+                print("  1. Your H1_USERNAME is correct (not your email)")
+                print("  2. Your H1_TOKEN is valid and not expired")
+                print("  3. API token has proper permissions")
                 return None
             
             response.raise_for_status()
@@ -194,6 +217,10 @@ class HackerOneAPIScopeFetcher:
         try:
             print(f"[*] Fetching from public directory...")
             print(f"[DEBUG] Directory URL: {url}")
+            
+            # Show curl command for debugging
+            curl_cmd = f"curl -X GET '{url}'"
+            print(f"[DEBUG] Equivalent curl: {curl_cmd}")
             
             response = requests.get(url, timeout=10)
             
