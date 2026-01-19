@@ -146,12 +146,15 @@ def resolve_targets(args):
         
         log(f'Filtered to {len(filtered_assets)} asset(s) using filter: {args.scope_filter}', 'INFO')
         
+        # Determine if IPs should be skipped
+        skip_ips = not args.include_ips
+        
         # Export scope if requested
         if args.export_scope:
-            ScopeExporter.to_text(filtered_assets, args.export_scope)
+            ScopeExporter.to_text(filtered_assets, args.export_scope, skip_ips=skip_ips)
         
-        # Extract scannable targets
-        targets = ScopeFilter.extract_targets(filtered_assets)
+        # Extract scannable targets (skip IPs by default)
+        targets = ScopeFilter.extract_targets(filtered_assets, skip_ips=skip_ips)
         
         if not targets:
             log('No scannable targets found in program scope', 'WARN')
@@ -192,6 +195,9 @@ Examples:
   
   # Export scope for review
   %(prog)s --fetch-scope --h1-program github --export-scope github_scope.txt
+  
+  # Include IP addresses in scan (default: skip)
+  %(prog)s --fetch-scope --h1-program shopify --include-ips
         '''
     )
     
@@ -222,6 +228,11 @@ Examples:
         choices=['all', 'bounty-eligible', 'in-scope', 'out-of-scope'],
         default='bounty-eligible',
         help='Filter scope by eligibility (default: bounty-eligible)'
+    )
+    scope_group.add_argument(
+        '--include-ips',
+        action='store_true',
+        help='Include IP addresses and CIDR ranges in scan (default: skip for faster scans)'
     )
     scope_group.add_argument(
         '--export-scope',
