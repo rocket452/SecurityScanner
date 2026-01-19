@@ -7,7 +7,7 @@ by creating fingerprints based on vulnerability characteristics.
 """
 
 import hashlib
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 
 def create_vuln_fingerprint(vuln: Dict) -> str:
@@ -64,7 +64,7 @@ def determine_source(vuln: Dict) -> str:
         return 'Custom Scanner'
 
 
-def deduplicate_vulnerabilities(vulnerabilities: List[Dict]) -> List[Dict]:
+def deduplicate_vulnerabilities(vulnerabilities: List[Dict]) -> Tuple[List[Dict], int]:
     """
     Remove duplicate vulnerabilities and track which scanners found them.
     
@@ -76,10 +76,10 @@ def deduplicate_vulnerabilities(vulnerabilities: List[Dict]) -> List[Dict]:
         vulnerabilities: List of vulnerability dictionaries
     
     Returns:
-        List of deduplicated vulnerabilities with 'sources' field added
+        Tuple of (deduplicated vulnerabilities list, duplicate count)
     """
     if not vulnerabilities:
-        return []
+        return [], 0
     
     seen_fingerprints = {}
     deduplicated = []

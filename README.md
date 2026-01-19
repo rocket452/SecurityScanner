@@ -499,9 +499,9 @@ The authors assume no liability for misuse or damage caused by this tool.
 ## 📞 Support
 
 For issues, questions, or contributions:
-- GitHub Issues: https://github.com/rocket452/SecurityScanner/issues
+- GitHub Issues: [https://github.com/rocket452/SecurityScanner/issues](https://github.com/rocket452/SecurityScanner/issues)
 - Documentation: This README
-- ZAP Documentation: https://www.zaproxy.org/docs/
+- ZAP Documentation: [https://www.zaproxy.org/docs/](https://www.zaproxy.org/docs/)
 
 ---
 

@@ -46,7 +46,7 @@ rate_limiting:
 zap:
   enabled: true
   # Use 'http://zap:8080' when running in Docker, 'http://localhost:8080' when running locally
-  proxy_url: 'http://zap:8080'
+  proxy_url: http://localhost:8080
   api_key: null  # Optional, not needed if API key disabled in ZAP
   timeout: 300   # Scan timeout in seconds
   spider: true   # Enable web crawler
