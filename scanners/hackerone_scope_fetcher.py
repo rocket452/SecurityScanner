@@ -321,17 +321,43 @@ class ScopeFilter:
         return [a for a in assets if a.asset_type in asset_types]
     
     @staticmethod
-    def extract_targets(assets: List[Asset]) -> List[str]:
+    def filter_web_assets_only(assets: List[Asset]) -> List[Asset]:
+        """
+        Filter to only web-scannable assets (URLs, domains, wildcards).
+        Excludes IP addresses and CIDR ranges by default.
+        
+        Args:
+            assets: List of Asset objects
+            
+        Returns:
+            Filtered list of web assets only
+        """
+        web_types = ['URL', 'DOMAIN', 'WILDCARD']
+        filtered = [a for a in assets if a.asset_type in web_types]
+        
+        if len(filtered) < len(assets):
+            excluded = len(assets) - len(filtered)
+            print(f"[INFO] Filtered out {excluded} IP/CIDR asset(s) (use --include-ips to scan them)")
+        
+        return filtered
+    
+    @staticmethod
+    def extract_targets(assets: List[Asset], skip_ips: bool = True) -> List[str]:
         """
         Extract scannable targets from assets.
         Handles wildcards, URLs, domains, and IPs.
         
         Args:
             assets: List of Asset objects
+            skip_ips: If True (default), skip IP_ADDRESS and CIDR assets
             
         Returns:
             List of target strings suitable for scanning
         """
+        # Filter out IPs by default
+        if skip_ips:
+            assets = ScopeFilter.filter_web_assets_only(assets)
+        
         targets: Set[str] = set()
         
         for asset in assets:
@@ -348,13 +374,15 @@ class ScopeFilter:
                     targets.add(target)
             
             elif asset.asset_type == 'IP_ADDRESS':
-                targets.add(identifier)
+                if not skip_ips:
+                    targets.add(identifier)
             
             elif asset.asset_type == 'CIDR':
-                # For CIDR ranges, add the base IP
-                # Note: Full CIDR scanning requires additional tools
-                base_ip = identifier.split('/')[0]
-                targets.add(base_ip)
+                if not skip_ips:
+                    # For CIDR ranges, add the base IP
+                    # Note: Full CIDR scanning requires additional tools
+                    base_ip = identifier.split('/')[0]
+                    targets.add(base_ip)
         
         return sorted(list(targets))
     
@@ -408,15 +436,16 @@ class ScopeExporter:
     """
     
     @staticmethod
-    def to_text(assets: List[Asset], filepath: str):
+    def to_text(assets: List[Asset], filepath: str, skip_ips: bool = True):
         """
         Export assets to plain text file.
         
         Args:
             assets: List of Asset objects
             filepath: Output file path
+            skip_ips: If True, skip IP/CIDR assets
         """
-        targets = ScopeFilter.extract_targets(assets)
+        targets = ScopeFilter.extract_targets(assets, skip_ips=skip_ips)
         
         with open(filepath, 'w') as f:
             for target in targets:
@@ -522,6 +551,11 @@ if __name__ == "__main__":
         help='Filter assets by eligibility (default: bounty-eligible)'
     )
     parser.add_argument(
+        '--include-ips',
+        action='store_true',
+        help='Include IP addresses and CIDR ranges in scan (default: skip)'
+    )
+    parser.add_argument(
         '--export',
         help='Export targets to text file'
     )
@@ -568,14 +602,16 @@ if __name__ == "__main__":
     ScopeExporter.print_summary(filtered_program)
     
     # Export if requested
+    skip_ips = not args.include_ips
+    
     if args.export:
-        ScopeExporter.to_text(filtered_assets, args.export)
+        ScopeExporter.to_text(filtered_assets, args.export, skip_ips=skip_ips)
     
     if args.export_json:
         ScopeExporter.to_json(filtered_program, args.export_json)
     
     # Print scannable targets
-    targets = ScopeFilter.extract_targets(filtered_assets)
+    targets = ScopeFilter.extract_targets(filtered_assets, skip_ips=skip_ips)
     print(f"\n[+] Scannable Targets ({len(targets)}):")
     for target in targets:
         print(f"  - {target}")
