@@ -9,6 +9,10 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import logging
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -86,10 +90,10 @@ class H1ReportGenerator:
             
             api_key = api_key or os.getenv('OPENAI_API_KEY')
             if not api_key:
-                raise ValueError('OpenAI API key not provided. Set OPENAI_API_KEY environment variable.')
+                raise ValueError('OpenAI API key not provided. Set OPENAI_API_KEY environment variable or pass via --api-key')
             
             self.client = openai.OpenAI(api_key=api_key)
-            self.model = model or 'gpt-4o'  # Default to GPT-4o
+            self.model = model or 'gpt-4o-mini'  # Default to GPT-4o-mini for cost-effective testing
             
         elif self.ai_provider == 'anthropic':
             if not ANTHROPIC_AVAILABLE:
@@ -97,7 +101,7 @@ class H1ReportGenerator:
             
             api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
             if not api_key:
-                raise ValueError('Anthropic API key not provided. Set ANTHROPIC_API_KEY environment variable.')
+                raise ValueError('Anthropic API key not provided. Set ANTHROPIC_API_KEY environment variable or pass via --api-key')
             
             self.client = anthropic.Anthropic(api_key=api_key)
             self.model = model or 'claude-3-5-sonnet-20241022'  # Default to Claude 3.5 Sonnet
@@ -305,14 +309,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Generate reports from scan results using OpenAI
+  # Generate reports from scan results using OpenAI (default: gpt-4o-mini)
   python -m scanners.h1_report_generator -i ./reports/scan_results.json -o ./h1_reports
   
   # Use Anthropic Claude instead
   python -m scanners.h1_report_generator -i ./reports/scan_results.json --provider anthropic
   
-  # Specify custom model
-  python -m scanners.h1_report_generator -i ./reports/scan_results.json --model gpt-4-turbo
+  # Use GPT-4o for higher quality (more expensive)
+  python -m scanners.h1_report_generator -i ./reports/scan_results.json --model gpt-4o
         '''
     )
     
@@ -334,11 +338,11 @@ Examples:
     )
     parser.add_argument(
         '--model',
-        help='Model name to use (default: provider-specific default)'
+        help='Model name to use (default: gpt-4o-mini for OpenAI, claude-3-5-sonnet for Anthropic)'
     )
     parser.add_argument(
         '--api-key',
-        help='API key for AI provider (default: from environment variable)'
+        help='API key for AI provider (default: from .env file or environment variable)'
     )
     
     args = parser.parse_args()
