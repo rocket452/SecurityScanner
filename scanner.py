@@ -256,7 +256,7 @@ Examples:
     output_group = parser.add_argument_group('Output Options')
     output_group.add_argument(
         '-o', '--output',
-        help='Output file path (default: /reports/report_<target>_<timestamp>.<format>)'
+        help='Output file path (default: ./reports/report_<target>_<timestamp>.<format>)'
     )
     output_group.add_argument(
         '-f', '--format',
@@ -823,15 +823,18 @@ def save_report(scan_results, target, output_file=None, format='json'):
     Returns:
         str: Path to saved report file
     """
-    # Create /reports directory if it doesn't exist
-    reports_dir = '/reports'
-    os.makedirs(reports_dir, exist_ok=True)
+    # Create reports directory relative to script location
+    script_dir = Path(__file__).parent
+    reports_dir = script_dir / 'reports'
+    reports_dir.mkdir(exist_ok=True)
     
     # Generate default filename if not provided
     if output_file is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_target = target.replace('://', '_').replace('/', '_').replace('.', '_')
-        output_file = f'{reports_dir}/report_{safe_target}_{timestamp}.{format}'
+        output_file = reports_dir / f'report_{safe_target}_{timestamp}.{format}'
+    else:
+        output_file = Path(output_file)
     
     try:
         # Prepare report data
@@ -860,7 +863,7 @@ def save_report(scan_results, target, output_file=None, format='json'):
         elif format == 'csv':
             save_csv_report(report_data, output_file)
         
-        return output_file
+        return str(output_file)
         
     except Exception as e:
         log(f'Error saving report: {e}', 'ERROR')
