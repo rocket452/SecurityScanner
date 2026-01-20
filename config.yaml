@@ -55,6 +55,37 @@ zap:
   max_spider_depth: 5  # Maximum crawl depth
 
 # ==============================================================================
+# AI REPORT GENERATION
+# ==============================================================================
+# Configuration for AI-powered HackerOne report generation
+# Supports OpenAI (GPT-4) and Anthropic (Claude) models
+#
+# Get your API keys:
+# - OpenAI: https://platform.openai.com/api-keys
+# - Anthropic: https://console.anthropic.com/
+#
+# Set API keys in .env file:
+# OPENAI_API_KEY=your_key_here
+# ANTHROPIC_API_KEY=your_key_here
+# ==============================================================================
+
+ai_reports:
+  enabled: true
+  # AI provider: 'openai' or 'anthropic'
+  provider: openai
+  
+  # Model selection
+  # OpenAI options: gpt-4o, gpt-4-turbo, gpt-4
+  # Anthropic options: claude-3-5-sonnet-20241022, claude-3-opus-20240229
+  model: gpt-4o
+  
+  # Auto-generate reports after scan completes
+  auto_generate: false
+  
+  # Output directory for generated reports
+  output_dir: ./h1_reports
+
+# ==============================================================================
 # API KEYS FOR ENHANCED SUBDOMAIN DISCOVERY
 # ==============================================================================
 # Add your free API keys below to significantly increase subdomain discovery.
