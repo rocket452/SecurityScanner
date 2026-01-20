@@ -50,8 +50,7 @@ ALL_SUBDOMAINS = []
 # ============================================================================
 
 def main():
-    """
-    Main entry point for the security scanner.
+    """Main entry point for the security scanner.
     Clean and simple: discover -> scan -> deduplicate -> report.
     """
     global SCAN_START_TIME
@@ -60,6 +59,17 @@ def main():
     # Parse arguments
     args = parse_arguments()
     
+    # Run with or without keep-awake based on flag
+    if args.keep_awake:
+        log('Keep-awake mode enabled - system will not sleep during scan', 'INFO')
+        from keep_awake import keep_awake_context
+        with keep_awake_context():
+            run_scan(args)
+    else:
+        run_scan(args)
+
+def run_scan(args):
+    """Execute the main scan workflow."""
     # Stage 0: Resolve target(s) - either from HackerOne or manual input
     targets = resolve_targets(args)
     
@@ -94,8 +104,7 @@ def main():
     generate_reports(all_scan_results, args, report_target)
 
 def resolve_targets(args):
-    """
-    Resolve target(s) from either HackerOne Scope Fetcher or manual input.
+    """Resolve target(s) from either HackerOne Scope Fetcher or manual input.
     
     Returns:
         List of target domain strings
@@ -198,6 +207,9 @@ Examples:
   
   # Include IP addresses in scan (default: skip)
   %(prog)s --fetch-scope --h1-program shopify --include-ips
+  
+  # Keep system awake during long scan
+  %(prog)s example.com --keep-awake
         '''
     )
     
@@ -244,7 +256,7 @@ Examples:
     output_group = parser.add_argument_group('Output Options')
     output_group.add_argument(
         '-o', '--output',
-        help='Output file path (default: /reports/report_<target>_<timestamp>.<format>)'
+        help='Output file path (default: ./reports/report_<target>_<timestamp>.<format>)'
     )
     output_group.add_argument(
         '-f', '--format',
@@ -256,6 +268,14 @@ Examples:
         '--no-file',
         action='store_true',
         help='Skip saving report to file (console only)'
+    )
+    
+    # System options
+    system_group = parser.add_argument_group('System Options')
+    system_group.add_argument(
+        '--keep-awake',
+        action='store_true',
+        help='Keep system awake during scan (prevents sleep, allows screen lock)'
     )
     
     # ZAP integration options
@@ -318,8 +338,7 @@ def print_header(target):
 # ============================================================================
 
 def discover_all_subdomains(target):
-    """
-    Discover all subdomains using multiple tools.
+    """Discover all subdomains using multiple tools.
     Returns a deduplicated list of all discovered subdomains including the base domain.
     """
     global ALL_SUBDOMAINS
@@ -348,8 +367,7 @@ def discover_all_subdomains(target):
 # ============================================================================
 
 def run_all_scans(subdomains, args):
-    """
-    Run all enabled vulnerability scans on discovered subdomains.
+    """Run all enabled vulnerability scans on discovered subdomains.
     Returns combined scan results from all scanners.
     """
     # Probe for live domains
@@ -381,9 +399,7 @@ def run_all_scans(subdomains, args):
     return scan_results
 
 def run_traditional_scans(live_domains, skip_nuclei=False):
-    """
-    Run traditional vulnerability scanners on live domains.
-    """
+    """Run traditional vulnerability scanners on live domains."""
     scan_results = []
     for url, is_live, status_code in live_domains:
         if is_live:
@@ -397,8 +413,7 @@ def run_traditional_scans(live_domains, skip_nuclei=False):
 # ============================================================================
 
 def generate_reports(scan_results, args, target):
-    """
-    Generate and save all reports.
+    """Generate and save all reports.
     Prints to console and optionally saves to file.
     """
     # Print to console
@@ -440,9 +455,7 @@ def log(msg, level='INFO'):
 # ============================================================================
 
 def retrieve_sub_domains_from_subfinder(target):
-    """
-    Use Subfinder to discover subdomains for the target domain.
-    """
+    """Use Subfinder to discover subdomains for the target domain."""
     log(f'Subfinder on {target}')
     cmd = ['subfinder', '-d', target, '-silent']
     
@@ -474,9 +487,7 @@ def retrieve_sub_domains_from_subfinder(target):
         return []
 
 def retrieve_sub_domains_from_amass(target):
-    """
-    Use Amass to discover subdomains for the target domain.
-    """
+    """Use Amass to discover subdomains for the target domain."""
     log(f'Amass on {target}')
     cmd = ['amass', 'enum', '-passive', '-d', target, '-silent']
     
@@ -508,9 +519,7 @@ def retrieve_sub_domains_from_amass(target):
         return []
 
 def deduplicate_domains(domains):
-    """
-    Remove duplicate domains from the list and return sorted unique domains.
-    """
+    """Remove duplicate domains from the list and return sorted unique domains."""
     unique_domains = sorted(set(domains))
     log(f'Deduplicated to {len(unique_domains)} unique domain(s)', 'INFO')
     return unique_domains
@@ -520,8 +529,7 @@ def deduplicate_domains(domains):
 # ============================================================================
 
 def run_zap_scans(live_domains, args):
-    """
-    Run OWASP ZAP scans on discovered subdomains.
+    """Run OWASP ZAP scans on discovered subdomains.
     
     Args:
         live_domains: List of (url, is_live, status_code) tuples
@@ -606,9 +614,7 @@ def run_zap_scans(live_domains, args):
 # ============================================================================
 
 def scan_single_domain_for_vulnerabilities(url, skip_nuclei=False):
-    """
-    Perform comprehensive vulnerability scanning on a single URL.
-    """
+    """Perform comprehensive vulnerability scanning on a single URL."""
     vulns = []
     
     try:
@@ -753,9 +759,7 @@ def scan_single_domain_for_vulnerabilities(url, skip_nuclei=False):
     return vulns
 
 def probe_live_domains(domains):
-    """
-    Test which domains are live and accessible via HTTP/HTTPS.
-    """
+    """Test which domains are live and accessible via HTTP/HTTPS."""
     live_domains = []
     timeout = CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
     
@@ -808,8 +812,7 @@ def print_scan_summary(domains, target):
     print('=' * 60 + '\n')
 
 def save_report(scan_results, target, output_file=None, format='json'):
-    """
-    Save vulnerability report to file in specified format.
+    """Save vulnerability report to file in specified format.
     
     Args:
         scan_results: List of (url, vulnerabilities) tuples
@@ -820,15 +823,18 @@ def save_report(scan_results, target, output_file=None, format='json'):
     Returns:
         str: Path to saved report file
     """
-    # Create /reports directory if it doesn't exist
-    reports_dir = '/reports'
-    os.makedirs(reports_dir, exist_ok=True)
+    # Create reports directory relative to script location
+    script_dir = Path(__file__).parent
+    reports_dir = script_dir / 'reports'
+    reports_dir.mkdir(exist_ok=True)
     
     # Generate default filename if not provided
     if output_file is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_target = target.replace('://', '_').replace('/', '_').replace('.', '_')
-        output_file = f'{reports_dir}/report_{safe_target}_{timestamp}.{format}'
+        output_file = reports_dir / f'report_{safe_target}_{timestamp}.{format}'
+    else:
+        output_file = Path(output_file)
     
     try:
         # Prepare report data
@@ -857,7 +863,7 @@ def save_report(scan_results, target, output_file=None, format='json'):
         elif format == 'csv':
             save_csv_report(report_data, output_file)
         
-        return output_file
+        return str(output_file)
         
     except Exception as e:
         log(f'Error saving report: {e}', 'ERROR')
