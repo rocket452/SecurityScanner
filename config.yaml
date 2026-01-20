@@ -3,6 +3,30 @@ target_domain: "platacard.mx"
 output_file: "vuln_report.json"
 
 # ==============================================================================
+# BUG BOUNTY PROGRAM CONFIGURATION
+# ==============================================================================
+# Program-specific settings for responsible disclosure
+#
+# Priceline Bug Bounty Requirements:
+# - Custom header: X-Bug-Bounty:your-HackerOne-username
+# - Rate limiting: Be respectful, 1-2 requests per second recommended
+# - Test window: Anytime, but be mindful of traffic
+# - SLA: 2 business days initial triage, bounty within 1-2 weeks
+# ==============================================================================
+
+bug_bounty:
+  program: "priceline"
+  hackerone_username: "nulllfungus"
+  
+  # Custom headers required by program
+  custom_headers:
+    X-Bug-Bounty: "nulllfungus"
+  
+  # Program-specific rate limits (requests per second)
+  # Priceline recommends conservative scanning
+  max_requests_per_second: 2
+
+# ==============================================================================
 # RATE LIMITING & PERFORMANCE SETTINGS
 # ==============================================================================
 # Adjust these values to control scan speed and avoid rate limiting/blocking
@@ -15,14 +39,14 @@ rate_limiting:
   ffuf_threads: 20
   
   # Nuclei rate limit (requests per minute)
-  # Default: 150 (moderate)
+  # Default: 150 (moderate) - Reduced for Priceline
   # Range: 10 (very slow) to 500 (fast)
-  nuclei_rate_limit: 150
+  nuclei_rate_limit: 120
   
   # Nuclei concurrency (parallel templates)
-  # Default: 25 (moderate)
+  # Default: 25 (moderate) - Reduced for Priceline
   # Range: 5 (slow) to 100 (fast)
-  nuclei_concurrency: 25
+  nuclei_concurrency: 15
   
   # HTTP request timeout (seconds)
   # Default: 10
@@ -31,8 +55,8 @@ rate_limiting:
   
   # Delay between requests (milliseconds)
   # Default: 0 (no delay)
-  # Use 100-500ms for stealthy scanning
-  request_delay: 0
+  # Use 100-500ms for stealthy scanning - Added delay for Priceline
+  request_delay: 500
 
 # ==============================================================================
 # OWASP ZAP CONFIGURATION
