@@ -45,6 +45,9 @@ CONFIG = load_config()
 SCAN_START_TIME = None
 ALL_SUBDOMAINS = []
 
+# Get custom headers from bug bounty config
+CUSTOM_HEADERS = CONFIG.get('bug_bounty', {}).get('custom_headers', {})
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -58,6 +61,18 @@ def main():
     
     # Parse arguments
     args = parse_arguments()
+    
+    # Log bug bounty program info if configured
+    bug_bounty_config = CONFIG.get('bug_bounty', {})
+    if bug_bounty_config:
+        program = bug_bounty_config.get('program')
+        username = bug_bounty_config.get('hackerone_username')
+        if program:
+            log(f'🎯 Bug Bounty Program: {program}', 'INFO')
+        if username:
+            log(f'👤 HackerOne Username: {username}', 'INFO')
+        if CUSTOM_HEADERS:
+            log(f'📋 Custom Headers: {", ".join(f"{k}: {v}" for k, v in CUSTOM_HEADERS.items())}', 'INFO')
     
     # Run with or without keep-awake based on flag
     if args.keep_awake:
@@ -763,7 +778,10 @@ def probe_live_domains(domains):
     live_domains = []
     timeout = CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
     
-    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+    # Create client with custom headers from config
+    headers = CUSTOM_HEADERS.copy() if CUSTOM_HEADERS else {}
+    
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
         for domain in sorted(domains):
             for proto in ['https', 'http']:
                 try:
