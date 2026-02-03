@@ -36,6 +36,11 @@ def load_config():
                 'passive_scan': True,
                 'active_scan': False,
                 'max_spider_depth': 5
+            },
+            'xss': {
+                'mode': 'basic',
+                'timeout': 10,
+                'callback_url': None
             }
         }
 
@@ -73,6 +78,13 @@ def main():
             log(f'👤 HackerOne Username: {username}', 'INFO')
         if CUSTOM_HEADERS:
             log(f'📋 Custom Headers: {", ".join(f"{k}: {v}" for k, v in CUSTOM_HEADERS.items())}', 'INFO')
+    
+    # Log XSS scanning configuration if enabled
+    if args.xss_deep:
+        xss_mode = args.xss_mode or CONFIG.get('xss', {}).get('mode', 'advanced')
+        log(f'🔍 Advanced XSS scanning enabled (mode: {xss_mode})', 'INFO')
+        if args.xss_payloads:
+            log(f'📝 Using custom XSS payloads from: {args.xss_payloads}', 'INFO')
     
     # Run with or without keep-awake based on flag
     if args.keep_awake:
@@ -201,27 +213,27 @@ def resolve_targets(args):
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Security Scanner with HackerOne Integration, ZAP and Nuclei',
+        description='Security Scanner with HackerOne Integration, ZAP, Nuclei, and Advanced XSS Detection',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
   # Manual target scan
   %(prog)s example.com --zap
   
+  # Basic XSS scan
+  %(prog)s example.com
+  
+  # Advanced XSS scan with deep testing
+  %(prog)s example.com --xss-deep
+  
+  # XSS exploitation mode with callback URL
+  %(prog)s example.com --xss-deep --xss-mode exploitation --xss-callback https://webhook.site/your-id
+  
+  # Custom XSS payloads
+  %(prog)s example.com --xss-deep --xss-payloads /path/to/payloads.txt
+  
   # HackerOne program scan (public program)
   %(prog)s --fetch-scope --h1-program github
-  
-  # HackerOne with credentials from .env file
-  %(prog)s --fetch-scope --h1-program github
-  
-  # HackerOne with credentials from command line
-  %(prog)s --fetch-scope --h1-username USER --h1-token TOKEN --h1-program github
-  
-  # Export scope for review
-  %(prog)s --fetch-scope --h1-program github --export-scope github_scope.txt
-  
-  # Include IP addresses in scan (default: skip)
-  %(prog)s --fetch-scope --h1-program shopify --include-ips
   
   # Keep system awake during long scan
   %(prog)s example.com --keep-awake
@@ -265,6 +277,29 @@ Examples:
         '--export-scope',
         metavar='FILE',
         help='Export filtered scope to text file'
+    )
+    
+    # XSS Scanning Options (NEW)
+    xss_group = parser.add_argument_group('Advanced XSS Scanning')
+    xss_group.add_argument(
+        '--xss-deep',
+        action='store_true',
+        help='Enable advanced XSS scanning with context detection and comprehensive payload testing'
+    )
+    xss_group.add_argument(
+        '--xss-mode',
+        choices=['basic', 'advanced', 'exploitation'],
+        help='XSS scanning mode: basic (fast), advanced (comprehensive), exploitation (blind XSS with callbacks)'
+    )
+    xss_group.add_argument(
+        '--xss-payloads',
+        metavar='FILE',
+        help='Path to custom XSS payload file (one payload per line)'
+    )
+    xss_group.add_argument(
+        '--xss-callback',
+        metavar='URL',
+        help='Callback URL for blind XSS detection (e.g., Burp Collaborator, webhook.site)'
     )
     
     # Output options
@@ -337,6 +372,10 @@ Examples:
     if args.fetch_scope and not args.h1_program:
         parser.error('--fetch-scope requires --h1-program')
     
+    # Validate XSS exploitation mode requires callback URL
+    if args.xss_mode == 'exploitation' and not args.xss_callback:
+        parser.error('--xss-mode exploitation requires --xss-callback URL')
+    
     return args
 
 def print_header(target):
@@ -399,7 +438,7 @@ def run_all_scans(subdomains, args):
     
     # Run traditional vulnerability scans unless --zap-only is specified
     if not args.zap_only:
-        traditional_results = run_traditional_scans(live_domains, skip_nuclei=args.skip_nuclei)
+        traditional_results = run_traditional_scans(live_domains, args, skip_nuclei=args.skip_nuclei)
         
         # Merge with ZAP results
         for url, vulns in traditional_results:
@@ -413,12 +452,12 @@ def run_all_scans(subdomains, args):
     
     return scan_results
 
-def run_traditional_scans(live_domains, skip_nuclei=False):
+def run_traditional_scans(live_domains, args, skip_nuclei=False):
     """Run traditional vulnerability scanners on live domains."""
     scan_results = []
     for url, is_live, status_code in live_domains:
         if is_live:
-            vulns = scan_single_domain_for_vulnerabilities(url, skip_nuclei=skip_nuclei)
+            vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
             scan_results.append((url, vulns))
     
     return scan_results
@@ -628,7 +667,7 @@ def run_zap_scans(live_domains, args):
 # VULNERABILITY SCANNING
 # ============================================================================
 
-def scan_single_domain_for_vulnerabilities(url, skip_nuclei=False):
+def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
     """Perform comprehensive vulnerability scanning on a single URL."""
     vulns = []
     
@@ -637,7 +676,6 @@ def scan_single_domain_for_vulnerabilities(url, skip_nuclei=False):
         from scanners.admin_scanner import check_admin
         from scanners.backup_scanner import check_backup
         from scanners.directory_scanner import check_exposed_buckets, fuzz_directories
-        from scanners.xss_scanner import check_xss
         
         # Admin panel detection
         if check_admin(url):
@@ -649,16 +687,47 @@ def scan_single_domain_for_vulnerabilities(url, skip_nuclei=False):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
             log(f'BACKUP on {url}', 'VULN')
         
-        # XSS vulnerability detection
-        xss_vulns = check_xss(url)
-        if xss_vulns:
-            for xss_vuln in xss_vulns:
-                xss_vuln['url'] = url
-            vulns.extend(xss_vulns)
-            for xss_vuln in xss_vulns:
-                severity = xss_vuln.get('severity', 'medium').upper()
-                desc = xss_vuln.get('description', 'XSS vulnerability')
-                log(f'XSS [{severity}] on {url}: {desc}', 'VULN')
+        # XSS vulnerability detection - Use advanced scanner if --xss-deep is enabled
+        if args.xss_deep:
+            from scanners.xss_advanced import advanced_xss_scan
+            
+            # Get XSS configuration
+            xss_mode = args.xss_mode or CONFIG.get('xss', {}).get('mode', 'advanced')
+            xss_timeout = CONFIG.get('xss', {}).get('timeout', 10)
+            xss_callback = args.xss_callback or CONFIG.get('xss', {}).get('callback_url')
+            
+            log(f'Running advanced XSS scan on {url} (mode: {xss_mode})', 'INFO')
+            
+            xss_vulns = advanced_xss_scan(
+                url,
+                mode=xss_mode,
+                custom_payloads_file=args.xss_payloads,
+                callback_url=xss_callback,
+                timeout=xss_timeout
+            )
+            
+            if xss_vulns:
+                for xss_vuln in xss_vulns:
+                    xss_vuln['url'] = url
+                vulns.extend(xss_vulns)
+                for xss_vuln in xss_vulns:
+                    severity = xss_vuln.get('severity', 'medium').upper()
+                    desc = xss_vuln.get('description', 'XSS vulnerability')
+                    score = xss_vuln.get('cvss_score', 'N/A')
+                    log(f'XSS [{severity}] on {url}: {desc} (score: {score})', 'VULN')
+        else:
+            # Use basic XSS scanner
+            from scanners.xss_scanner import check_xss
+            
+            xss_vulns = check_xss(url)
+            if xss_vulns:
+                for xss_vuln in xss_vulns:
+                    xss_vuln['url'] = url
+                vulns.extend(xss_vulns)
+                for xss_vuln in xss_vulns:
+                    severity = xss_vuln.get('severity', 'medium').upper()
+                    desc = xss_vuln.get('description', 'XSS vulnerability')
+                    log(f'XSS [{severity}] on {url}: {desc}', 'VULN')
         
         # Exposed buckets/storage detection (scanner module handles its own logging)
         bucket_results = check_exposed_buckets(url)
