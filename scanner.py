@@ -7,6 +7,7 @@ import yaml
 import json
 import csv
 import os
+import html as html_escape
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -962,19 +963,19 @@ def save_json_report(report_data, output_file):
         json.dump(report_data, f, indent=2)
 
 def save_html_report(report_data, output_file):
-    """Save report in HTML format with styling."""
+    """Save report in HTML format with detailed XSS exploitation steps."""
     html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Security Scan Report - {report_data['target']}</title>
+    <title>Security Scan Report - {html_escape.escape(report_data['target'])}</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             line-height: 1.6;
             color: #333;
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
             padding: 20px;
             background: #f5f5f5;
@@ -1015,29 +1016,76 @@ def save_html_report(report_data, output_file):
         }}
         .target-header h2 {{ margin: 0; color: #495057; }}
         .vuln-item {{
-            padding: 15px 20px;
+            padding: 20px;
             border-bottom: 1px solid #e9ecef;
         }}
         .vuln-item:last-child {{ border-bottom: none; }}
+        .vuln-header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }}
         .severity {{
             display: inline-block;
-            padding: 4px 12px;
+            padding: 6px 14px;
             border-radius: 4px;
             font-size: 12px;
             font-weight: bold;
             text-transform: uppercase;
-            margin-right: 10px;
+            margin-right: 12px;
         }}
         .severity.critical {{ background: #dc3545; color: white; }}
         .severity.high {{ background: #fd7e14; color: white; }}
         .severity.medium {{ background: #ffc107; color: black; }}
         .severity.low {{ background: #28a745; color: white; }}
         .severity.info {{ background: #17a2b8; color: white; }}
-        .sources {{
+        .vuln-type {{
+            font-weight: 600;
+            color: #495057;
+            font-size: 16px;
+        }}
+        .detail-section {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }}
+        .detail-section h4 {{
+            margin: 0 0 10px 0;
+            color: #667eea;
+            font-size: 14px;
+        }}
+        .code-block {{
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 12px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            margin: 8px 0;
+        }}
+        .steps-list {{
+            margin: 10px 0;
+            padding-left: 20px;
+        }}
+        .steps-list li {{
+            margin: 8px 0;
+            color: #495057;
+        }}
+        .badge {{
             display: inline-block;
-            font-size: 11px;
-            color: #666;
-            margin-left: 10px;
+            padding: 4px 10px;
+            background: #e9ecef;
+            border-radius: 3px;
+            font-size: 12px;
+            color: #495057;
+            margin: 5px 5px 5px 0;
+        }}
+        .score-badge {{
+            background: #667eea;
+            color: white;
+            font-weight: 600;
         }}
         .no-vulns {{
             background: white;
@@ -1046,12 +1094,17 @@ def save_html_report(report_data, output_file):
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }}
+        .description {{
+            color: #495057;
+            margin: 10px 0;
+            font-size: 14px;
+        }}
     </style>
 </head>
 <body>
     <div class="header">
         <h1>🔒 Security Scan Report</h1>
-        <p><strong>Target:</strong> {report_data['target']}</p>
+        <p><strong>Target:</strong> {html_escape.escape(report_data['target'])}</p>
         <p><strong>Scan Date:</strong> {report_data['scan_date']}</p>
     </div>
     
@@ -1074,23 +1127,115 @@ def save_html_report(report_data, output_file):
             if result['vulnerabilities']:
                 html += f'''    <div class="target-section">
         <div class="target-header">
-            <h2>{result['url']}</h2>
+            <h2>{html_escape.escape(result['url'])}</h2>
             <p>{result['vulnerability_count']} vulnerability(ies) found</p>
         </div>
 '''
                 for vuln in result['vulnerabilities']:
                     severity = vuln.get('severity', 'low')
-                    desc = vuln.get('description', 'No description')
-                    vuln_type = vuln.get('type', 'unknown')
-                    sources = vuln.get('sources', [])
-                    sources_html = f'<span class="sources">Detected by: {", ".join(sources)}</span>' if sources else ''
+                    desc = html_escape.escape(vuln.get('description', 'No description'))
+                    vuln_type = vuln.get('type', 'unknown').replace('_', ' ').title()
+                    
                     html += f'''        <div class="vuln-item">
-            <span class="severity {severity}">{severity}</span>
-            <strong>{vuln_type.replace('_', ' ').title()}:</strong> {desc}
-            {sources_html}
-        </div>
+            <div class="vuln-header">
+                <span class="severity {severity}">{severity.upper()}</span>
+                <span class="vuln-type">{vuln_type}</span>
+            </div>
+            <div class="description">{desc}</div>
 '''
-                html += '    </div>\n'
+                    
+                    # Add XSS-specific details
+                    if vuln.get('type', '').lower().endswith('xss'):
+                        # Payload
+                        payload = vuln.get('payload')
+                        if payload:
+                            html += f'''            <div class="detail-section">
+                <h4>💥 Successful Payload</h4>
+                <div class="code-block">{html_escape.escape(payload)}</div>
+            </div>
+'''
+                        
+                        # Target info
+                        param = vuln.get('parameter')
+                        method = vuln.get('method')
+                        context = vuln.get('context')
+                        if param or method or context:
+                            html += '            <div class="detail-section">\n'
+                            html += '                <h4>🎯 Target Information</h4>\n'
+                            if param:
+                                html += f'                <span class="badge"><strong>Parameter:</strong> {html_escape.escape(param)}</span>\n'
+                            if method:
+                                html += f'                <span class="badge"><strong>Method:</strong> {method}</span>\n'
+                            if context:
+                                html += f'                <span class="badge"><strong>Context:</strong> {context}</span>\n'
+                            html += '            </div>\n'
+                        
+                        # CVSS Score
+                        cvss_score = vuln.get('cvss_score')
+                        severity_reasoning = vuln.get('severity_reasoning')
+                        if cvss_score:
+                            html += f'''            <div class="detail-section">
+                <h4>📈 Severity Analysis</h4>
+                <span class="badge score-badge">CVSS Score: {cvss_score}/10.0</span>
+'''
+                            if severity_reasoning:
+                                html += f'                <p style="margin-top: 10px; font-size: 13px; color: #666;">{html_escape.escape(severity_reasoning)}</p>\n'
+                            html += '            </div>\n'
+                        
+                        # CSP Analysis
+                        csp_analysis = vuln.get('csp_analysis', {})
+                        if csp_analysis and csp_analysis.get('potential_bypasses'):
+                            html += '            <div class="detail-section">\n'
+                            html += '                <h4>🔒 Content Security Policy Analysis</h4>\n'
+                            for bypass in csp_analysis['potential_bypasses']:
+                                html += f'                <p style="font-size: 13px; margin: 5px 0;">• {html_escape.escape(bypass)}</p>\n'
+                            html += '            </div>\n'
+                        
+                        # Exploitation section
+                        exploitation = vuln.get('exploitation', {})
+                        if exploitation:
+                            # Curl command
+                            curl_cmd = exploitation.get('curl_command')
+                            if curl_cmd:
+                                html += f'''            <div class="detail-section">
+                <h4>🔧 Reproduce with cURL</h4>
+                <div class="code-block">{html_escape.escape(curl_cmd)}</div>
+            </div>
+'''
+                            
+                            # Browser steps
+                            browser_steps = exploitation.get('browser_steps', [])
+                            if browser_steps:
+                                html += '            <div class="detail-section">\n'
+                                html += '                <h4>🌐 Browser Reproduction Steps</h4>\n'
+                                html += '                <ol class="steps-list">\n'
+                                for step in browser_steps:
+                                    html += f'                    <li>{html_escape.escape(step)}</li>\n'
+                                html += '                </ol>\n'
+                                html += '            </div>\n'
+                            
+                            # PoC HTML
+                            poc_html = exploitation.get('poc_html')
+                            if poc_html:
+                                html += '''            <div class="detail-section">
+                <h4>📄 HTML Proof of Concept</h4>
+                <p style="font-size: 13px; margin-bottom: 10px;">Copy the following HTML to a file and open it in a browser:</p>
+                <div class="code-block">'''
+                                html += html_escape.escape(poc_html[:500])  # Truncate for readability
+                                if len(poc_html) > 500:
+                                    html += '\n... (truncated)'
+                                html += '</div>\n'
+                                html += '            </div>\n'
+                    
+                    # Sources
+                    sources = vuln.get('sources', [])
+                    if sources:
+                        html += '            <div style="margin-top: 15px; font-size: 12px; color: #666;">\n'
+                        html += f'                🔍 Detected by: {html_escape.escape(", ".join(sources))}\n'
+                        html += '            </div>\n'
+                    
+                    html += '        </div>\n'  # Close vuln-item
+                html += '    </div>\n'  # Close target-section
     
     html += '''</body>
 </html>'''
