@@ -958,7 +958,7 @@ def save_report(scan_results, target, output_file=None, format='json'):
 
 def save_json_report(report_data, output_file):
     """Save report in JSON format."""
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(report_data, f, indent=2)
 
 def save_html_report(report_data, output_file):
@@ -1095,7 +1095,7 @@ def save_html_report(report_data, output_file):
     html += '''</body>
 </html>'''
     
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         f.write(html)
 
 def save_markdown_report(report_data, output_file):
@@ -1129,12 +1129,12 @@ def save_markdown_report(report_data, output_file):
                 
                 md += '\n'
     
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         f.write(md)
 
 def save_csv_report(report_data, output_file):
     """Save report in CSV format."""
-    with open(output_file, 'w', newline='') as f:
+    with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['Target', 'URL', 'Vulnerability Type', 'Description', 'Severity', 'Status Code', 'Sources'])
         
