@@ -68,7 +68,7 @@ rate_limiting:
 # ==============================================================================
 
 zap:
-  enabled: true
+  enabled: false  # Changed to false - use --zap flag to enable
   # Use 'http://zap:8080' when running in Docker, 'http://localhost:8080' when running locally
   proxy_url: http://localhost:8080
   api_key: null  # Optional, not needed if API key disabled in ZAP
@@ -77,6 +77,16 @@ zap:
   passive_scan: true   # Enable passive vulnerability detection
   active_scan: false   # Enable active scanning (use with caution!)
   max_spider_depth: 5  # Maximum crawl depth
+
+# ==============================================================================
+# XSS SCANNING CONFIGURATION
+# ==============================================================================
+# Advanced XSS detection settings
+
+xss:
+  mode: advanced  # Options: basic, advanced, exploitation
+  timeout: 10  # Request timeout in seconds
+  callback_url: null  # For blind XSS detection (e.g., Burp Collaborator)
 
 # ==============================================================================
 # AI REPORT GENERATION
