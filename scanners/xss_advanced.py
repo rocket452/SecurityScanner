@@ -3,6 +3,7 @@
 Advanced XSS Scanner with Context Detection and Exploitation Proof
 
 Features:
+- Arjun integration for hidden parameter discovery
 - Context-aware payload selection (HTML, attribute, JavaScript, URL, CSS)
 - CSP detection and bypass attempts
 - Exploitation proof generation (curl commands, browser steps)
@@ -18,6 +19,7 @@ from typing import List, Dict, Tuple, Optional, Set
 from html.parser import HTMLParser
 from .xss_payloads import XSSPayloads, load_custom_payloads
 from .xss_scanner import FormParser, extract_forms, log
+from .param_discovery import discover_parameters
 
 
 class ContextDetector:
@@ -364,7 +366,8 @@ def advanced_xss_scan(url: str,
                       mode: str = 'advanced',
                       custom_payloads_file: Optional[str] = None,
                       callback_url: Optional[str] = None,
-                      timeout: int = 10) -> List[Dict]:
+                      timeout: int = 10,
+                      enable_param_discovery: bool = True) -> List[Dict]:
     """
     Advanced XSS scanning with context detection and exploitation proofs
     
@@ -374,6 +377,7 @@ def advanced_xss_scan(url: str,
         custom_payloads_file: Path to custom payloads file
         callback_url: Callback URL for blind XSS testing
         timeout: Request timeout in seconds
+        enable_param_discovery: Use Arjun to discover hidden parameters
     
     Returns:
         List of vulnerability dictionaries with detailed information
@@ -414,6 +418,19 @@ def advanced_xss_scan(url: str,
             # Parse URL parameters
             parsed = urllib.parse.urlparse(url)
             params = urllib.parse.parse_qs(parsed.query)
+            
+            # Arjun parameter discovery (if enabled)
+            discovered_params = []
+            if enable_param_discovery and mode in ['advanced', 'exploitation']:
+                log("Running Arjun parameter discovery...", 'INFO')
+                arjun_result = discover_parameters(url, method='GET', threads=5, timeout=30)
+                if arjun_result['parameters']:
+                    discovered_params = arjun_result['parameters']
+                    log(f"Arjun found {len(discovered_params)} hidden parameters: {', '.join(discovered_params)}", 'INFO')
+                    # Add discovered params to test list
+                    for param in discovered_params:
+                        if param not in params:
+                            params[param] = ['test']
             
             if not params:
                 # Try common parameter names
@@ -483,6 +500,9 @@ def advanced_xss_scan(url: str,
                                 'GET', base_url, flat_params, payload
                             )
                             
+                            # Mark if discovered by Arjun
+                            discovery_method = 'Arjun' if param_name in discovered_params else 'URL parsing'
+                            
                             vuln = {
                                 'type': 'reflected_xss',
                                 'method': 'GET',
@@ -494,6 +514,7 @@ def advanced_xss_scan(url: str,
                                 'cvss_score': score,
                                 'severity_reasoning': reasoning,
                                 'description': f'Reflected XSS in GET parameter "{param_name}" (context: {context})',
+                                'discovery_method': discovery_method,
                                 'csp_analysis': csp_analysis,
                                 'exploitation': {
                                     'curl_command': curl_cmd,
@@ -503,7 +524,7 @@ def advanced_xss_scan(url: str,
                             }
                             
                             vulnerabilities.append(vuln)
-                            log(f"XSS FOUND: {param_name} (severity: {severity}, score: {score})", 'VULN')
+                            log(f"XSS FOUND: {param_name} (severity: {severity}, score: {score}, discovered via: {discovery_method})", 'VULN')
                             break  # Move to next parameter after finding vulnerability
                     
                     except httpx.TimeoutException:
@@ -553,6 +574,7 @@ def advanced_xss_scan(url: str,
                                         'url': form_url,
                                         'severity': 'high',
                                         'description': f'Reflected XSS in {form["method"]} form input "{field_name}"',
+                                        'discovery_method': 'Form extraction',
                                     })
                                     log(f"XSS FOUND: Form input {field_name}", 'VULN')
                                     break
