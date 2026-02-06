@@ -90,39 +90,143 @@ SecurityScanner automates the discovery and assessment of web application vulner
 
 ## 🚀 Quick Start
 
-### Prerequisites
-
-- Docker & Docker Compose
-- Git
-
-### Installation
+### 1. Clone and build
 
 ```bash
-# Clone the repository
 git clone https://github.com/rocket452/SecurityScanner.git
 cd SecurityScanner
 
-# Start all services (ZAP + Scanner)
+# Build scanner image and start ZAP service
 docker-compose up -d --build
-
-# Verify ZAP is running
-curl http://localhost:8080
 ```
 
-### Running Your First Scan
+This will:
+- Build the main scanner image
+- Start OWASP ZAP on port 8080
+- Create / use the reports/ directory for output
+
+## 📖 Basic Usage
+
+### Scan a single target
 
 ```bash
-# Basic scan (all tools except ZAP)
-docker-compose run scanner example.com
-
-# With ZAP integration
-docker-compose run scanner example.com --zap
-
-# ZAP with active scanning (requires authorization!)
-docker-compose run scanner example.com --zap --zap-active
+# Generic target (domain or host:port)
+docker-compose run scanner target.com
 ```
 
-## 📖 Usage Examples
+Examples:
+
+```bash
+# Public test site
+docker-compose run scanner testphp.vulnweb.com
+
+# Local app (e.g., running on your host)
+docker-compose run scanner host.docker.internal:3000
+```
+
+## 🎯 XSS Scanner Usage
+
+### Enable deep XSS scanning
+
+```bash
+docker-compose run scanner target.com --xss-deep
+```
+
+- Runs the advanced, context-aware XSS scanner
+- Uses 62+ payloads with context detection (HTML, JS, attribute, URL, CSS)
+- Generates exploitation details (payload, PoC, curl, browser steps, severity)
+
+### Choose XSS mode
+
+```bash
+# Basic (fewer payloads, faster)
+docker-compose run scanner target.com --xss-deep --xss-mode basic
+
+# Advanced (recommended)
+docker-compose run scanner target.com --xss-deep --xss-mode advanced
+
+# Exploitation / blind XSS (requires callback URL)
+docker-compose run scanner target.com \
+  --xss-deep \
+  --xss-mode exploitation \
+  --xss-callback https://your-callback.example/xss
+```
+
+### Example: known vulnerable test site
+
+```bash
+docker-compose run scanner testphp.vulnweb.com \
+  --xss-deep \
+  --skip-nuclei \
+  -f html
+```
+
+This can detect, for example:
+- Reflected XSS in POST form input searchFor
+- Exposed admin panel
+- Exposed directories (e.g., /images/)
+
+## 📊 Output and Reports
+
+By default, reports are written inside the container to `/app/reports` and are mounted to the local `./reports` folder.
+
+### Choose output format
+
+```bash
+# HTML report (recommended for humans)
+docker-compose run scanner target.com --xss-deep -f html
+
+# JSON (for tooling / automation)
+docker-compose run scanner target.com --xss-deep -f json
+
+# Markdown
+docker-compose run scanner target.com --xss-deep -f markdown
+
+# CSV
+docker-compose run scanner target.com --xss-deep -f csv
+```
+
+### Specify output filename
+
+```bash
+docker-compose run scanner target.com \
+  --xss-deep \
+  -f html \
+  -o my_scan_report.html
+```
+
+### Where to find reports
+
+On your host (from the repo root):
+
+```bash
+# List reports
+ls reports/
+
+# On Windows:
+dir reports
+
+# Open latest HTML report (Windows)
+start reports\my_scan_report.html
+```
+
+## 🐳 Running Against Local Apps (Docker Desktop)
+
+If your target is running on your host (e.g., OWASP Juice Shop, DVWA):
+
+Use `host.docker.internal` instead of `localhost` from inside the scanner container.
+
+Examples:
+
+```bash
+# Juice Shop on host port 3000
+docker-compose run scanner host.docker.internal:3000 --xss-deep --xss-mode advanced -f html
+
+# DVWA on host port 8090
+docker-compose run scanner host.docker.internal:8090 --xss-deep --skip-nuclei -f html
+```
+
+## 📚 Advanced Usage Examples
 
 ### Standard Workflow
 
