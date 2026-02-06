@@ -33,13 +33,16 @@ COPY . /app
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Arjun for parameter discovery
+RUN pip install arjun
+
 # Create /reports directory for output files
 RUN mkdir -p /reports
 
 # Declare volume for reports
 VOLUME ["/reports"]
 
-# Health check
-RUN subfinder --version && amass --version && nuclei -version && ffuf -V
+# Health check (arjun doesn't support --version flag)
+RUN subfinder --version && amass --version && nuclei -version && ffuf -V && arjun -h > /dev/null
 
 ENTRYPOINT ["python", "scanner.py"]
