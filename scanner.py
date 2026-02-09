@@ -83,9 +83,11 @@ def main():
     # Log XSS scanning configuration if enabled
     if args.xss_deep:
         xss_mode = args.xss_mode or CONFIG.get('xss', {}).get('mode', 'advanced')
-        log(f'🔍 Advanced XSS scanning enabled (mode: {xss_mode})', 'INFO')
+        log(f'🔍 Enhanced Breakout XSS scanning enabled (mode: {xss_mode})', 'INFO')
         if args.xss_payloads:
             log(f'📝 Using custom XSS payloads from: {args.xss_payloads}', 'INFO')
+        if args.xss_callback:
+            log(f'🔗 Blind XSS callback URL: {args.xss_callback}', 'INFO')
     
     # Run with or without keep-awake based on flag
     if args.keep_awake:
@@ -214,7 +216,7 @@ def resolve_targets(args):
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Security Scanner with HackerOne Integration, ZAP, Nuclei, and Advanced XSS Detection',
+        description='Security Scanner with Enhanced Breakout XSS Detection, HackerOne Integration, ZAP, and Nuclei',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
@@ -224,17 +226,17 @@ Examples:
   # Basic XSS scan
   %(prog)s example.com
   
-  # Advanced XSS scan with deep testing
+  # Enhanced Breakout XSS scan with context detection
   %(prog)s example.com --xss-deep
   
-  # XSS exploitation mode with callback URL
+  # XSS exploitation mode with callback URL for blind XSS
   %(prog)s example.com --xss-deep --xss-mode exploitation --xss-callback https://webhook.site/your-id
   
   # Custom XSS payloads
   %(prog)s example.com --xss-deep --xss-payloads /path/to/payloads.txt
   
   # HackerOne program scan (public program)
-  %(prog)s --fetch-scope --h1-program github
+  %(prog)s --fetch-scope --h1-program github --xss-deep
   
   # Keep system awake during long scan
   %(prog)s example.com --keep-awake
@@ -280,17 +282,17 @@ Examples:
         help='Export filtered scope to text file'
     )
     
-    # XSS Scanning Options (NEW)
-    xss_group = parser.add_argument_group('Advanced XSS Scanning')
+    # XSS Scanning Options (Enhanced Breakout Detection)
+    xss_group = parser.add_argument_group('Enhanced Breakout XSS Scanning')
     xss_group.add_argument(
         '--xss-deep',
         action='store_true',
-        help='Enable advanced XSS scanning with context detection and comprehensive payload testing'
+        help='Enable enhanced breakout XSS detection with template literals, JSON contexts, and multi-layer encoding analysis'
     )
     xss_group.add_argument(
         '--xss-mode',
         choices=['basic', 'advanced', 'exploitation'],
-        help='XSS scanning mode: basic (fast), advanced (comprehensive), exploitation (blind XSS with callbacks)'
+        help='XSS scanning mode: basic (fast), advanced (comprehensive breakout detection), exploitation (blind XSS with callbacks)'
     )
     xss_group.add_argument(
         '--xss-payloads',
@@ -688,34 +690,25 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
             log(f'BACKUP on {url}', 'VULN')
         
-        # XSS vulnerability detection - Use advanced scanner if --xss-deep is enabled
+        # Enhanced Breakout XSS Detection - Use enhanced detector if --xss-deep is enabled
         if args.xss_deep:
-            from scanners.xss_advanced import advanced_xss_scan
+            from scanners.xss_breakout_scanner_patch import scan_for_breakout_xss
             
             # Get XSS configuration
-            xss_mode = args.xss_mode or CONFIG.get('xss', {}).get('mode', 'advanced')
             xss_timeout = CONFIG.get('xss', {}).get('timeout', 10)
             xss_callback = args.xss_callback or CONFIG.get('xss', {}).get('callback_url')
             
-            log(f'Running advanced XSS scan on {url} (mode: {xss_mode})', 'INFO')
+            log(f'🎯 Running enhanced breakout XSS scan on {url}', 'INFO')
             
-            xss_vulns = advanced_xss_scan(
-                url,
-                mode=xss_mode,
-                custom_payloads_file=args.xss_payloads,
-                callback_url=xss_callback,
-                timeout=xss_timeout
+            breakout_vulns = scan_for_breakout_xss(
+                url=url,
+                args=args,
+                timeout=xss_timeout,
+                callback_url=xss_callback
             )
             
-            if xss_vulns:
-                for xss_vuln in xss_vulns:
-                    xss_vuln['url'] = url
-                vulns.extend(xss_vulns)
-                for xss_vuln in xss_vulns:
-                    severity = xss_vuln.get('severity', 'medium').upper()
-                    desc = xss_vuln.get('description', 'XSS vulnerability')
-                    score = xss_vuln.get('cvss_score', 'N/A')
-                    log(f'XSS [{severity}] on {url}: {desc} (score: {score})', 'VULN')
+            if breakout_vulns:
+                vulns.extend(breakout_vulns)
         else:
             # Use basic XSS scanner
             from scanners.xss_scanner import check_xss
@@ -1099,6 +1092,13 @@ def save_html_report(report_data, output_file):
             margin: 10px 0;
             font-size: 14px;
         }}
+        .breakout-context {{
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 12px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }}
     </style>
 </head>
 <body>
@@ -1144,7 +1144,38 @@ def save_html_report(report_data, output_file):
             <div class="description">{desc}</div>
 '''
                     
-                    # Add XSS-specific details
+                    # Add breakout XSS-specific details
+                    if vuln.get('type', '').lower() == 'breakout_xss':
+                        # Context information
+                        context_type = vuln.get('context_type')
+                        context_desc = vuln.get('context_description')
+                        if context_type or context_desc:
+                            html += '            <div class="breakout-context">\n'
+                            html += '                <h4 style="margin: 0 0 8px 0; color: #856404;">🎯 Breakout Context</h4>\n'
+                            if context_type:
+                                html += f'                <p style="margin: 5px 0;"><strong>Type:</strong> {html_escape.escape(context_type)}</p>\n'
+                            if context_desc:
+                                html += f'                <p style="margin: 5px 0;">{html_escape.escape(context_desc)}</p>\n'
+                            html += '            </div>\n'
+                        
+                        # Context snippet
+                        context_snippet = vuln.get('context_snippet')
+                        if context_snippet:
+                            html += '            <div class="detail-section">\n'
+                            html += '                <h4>📝 Code Context</h4>\n'
+                            html += f'                <div class="code-block">{html_escape.escape(context_snippet[:300])}</div>\n'
+                            html += '            </div>\n'
+                        
+                        # Encoding layers
+                        encoding_layers = vuln.get('encoding_layers', [])
+                        if encoding_layers:
+                            html += '            <div class="detail-section">\n'
+                            html += '                <h4>🔒 Encoding Detected</h4>\n'
+                            for layer in encoding_layers:
+                                html += f'                <span class="badge">{html_escape.escape(layer)}</span>\n'
+                            html += '            </div>\n'
+                    
+                    # Add XSS-specific details (for all XSS types)
                     if vuln.get('type', '').lower().endswith('xss'):
                         # Payload
                         payload = vuln.get('payload')
@@ -1182,15 +1213,6 @@ def save_html_report(report_data, output_file):
                                 html += f'                <p style="margin-top: 10px; font-size: 13px; color: #666;">{html_escape.escape(severity_reasoning)}</p>\n'
                             html += '            </div>\n'
                         
-                        # CSP Analysis
-                        csp_analysis = vuln.get('csp_analysis', {})
-                        if csp_analysis and csp_analysis.get('potential_bypasses'):
-                            html += '            <div class="detail-section">\n'
-                            html += '                <h4>🔒 Content Security Policy Analysis</h4>\n'
-                            for bypass in csp_analysis['potential_bypasses']:
-                                html += f'                <p style="font-size: 13px; margin: 5px 0;">• {html_escape.escape(bypass)}</p>\n'
-                            html += '            </div>\n'
-                        
                         # Exploitation section
                         exploitation = vuln.get('exploitation', {})
                         if exploitation:
@@ -1213,19 +1235,14 @@ def save_html_report(report_data, output_file):
                                     html += f'                    <li>{html_escape.escape(step)}</li>\n'
                                 html += '                </ol>\n'
                                 html += '            </div>\n'
-                            
-                            # PoC HTML
-                            poc_html = exploitation.get('poc_html')
-                            if poc_html:
-                                html += '''            <div class="detail-section">
-                <h4>📄 HTML Proof of Concept</h4>
-                <p style="font-size: 13px; margin-bottom: 10px;">Copy the following HTML to a file and open it in a browser:</p>
-                <div class="code-block">'''
-                                html += html_escape.escape(poc_html[:500])  # Truncate for readability
-                                if len(poc_html) > 500:
-                                    html += '\n... (truncated)'
-                                html += '</div>\n'
-                                html += '            </div>\n'
+                        
+                        # Remediation
+                        remediation = vuln.get('remediation')
+                        if remediation:
+                            html += '            <div class="detail-section">\n'
+                            html += '                <h4>🛡️ Remediation</h4>\n'
+                            html += f'                <p style="font-size: 13px; color: #495057;">{html_escape.escape(remediation[:500])}</p>\n'
+                            html += '            </div>\n'
                     
                     # Sources
                     sources = vuln.get('sources', [])

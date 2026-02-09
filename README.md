@@ -21,7 +21,7 @@ SecurityScanner automates the discovery and assessment of web application vulner
 
 ### Custom Scanners
 
-- **XSS Scanner**: Detects reflected and stored XSS vulnerabilities
+- **Enhanced Breakout XSS Scanner**: Detects context-aware XSS with template literal, JSON, and multi-encoding detection
 - **Admin Panel Scanner**: Discovers exposed administrative interfaces
 - **Backup File Scanner**: Finds leaked backup files and archives
 - **Directory Scanner**: Identifies exposed storage buckets and directories
@@ -124,25 +124,53 @@ docker-compose run scanner testphp.vulnweb.com
 docker-compose run scanner host.docker.internal:3000
 ```
 
-## 🎯 XSS Scanner Usage
+## 🎯 Enhanced Breakout XSS Scanner
 
-### Enable deep XSS scanning
+### What is Breakout XSS?
+
+Breakout XSS occurs when user input is reflected in a **restricted context** (JavaScript strings, JSON, template literals) where simple payloads like `<script>alert(1)</script>` are blocked, but **context-specific escape sequences** allow XSS execution.
+
+**Example Scenarios:**
+```javascript
+// JavaScript String Context
+var search = 'USER_INPUT';  // Payload: ';alert(1);//
+
+// Template Literal Context  
+const msg = `Hello ${USER_INPUT}`;  // Payload: ${alert(1)}
+
+// JSON Context
+{"query": "USER_INPUT"}  // Payload: "};alert(1);//
+```
+
+### Features
+
+✅ **Template Literal Detection** - Detects `` `${payload}` `` contexts  
+✅ **JSON Context Breakout** - Escapes JSON structures with `"}` patterns  
+✅ **Multi-Layer Encoding** - Detects URL, HTML, Unicode, and JavaScript encoding  
+✅ **JavaScript String Contexts** - Single/double quote escape detection  
+✅ **WAF Bypass Payloads** - Encoding variations to evade filters  
+✅ **Context Snippets** - Shows exact code where input is reflected  
+✅ **CVSS Scoring** - Automated severity calculation  
+✅ **Arjun Integration** - Automatic hidden parameter discovery  
+
+### Enable Enhanced Breakout XSS Scanning
 
 ```bash
+# Enable advanced breakout detection
 docker-compose run scanner target.com --xss-deep
 ```
 
-- Runs the advanced, context-aware XSS scanner
-- Uses 62+ payloads with context detection (HTML, JS, attribute, URL, CSS)
-- Generates exploitation details (payload, PoC, curl, browser steps, severity)
+- Runs the enhanced breakout XSS scanner
+- Uses 62+ payloads with context detection (HTML, JS string, template literal, JSON, attribute, URL, CSS)
+- Generates detailed exploitation proof with code snippets
 
-### Choose XSS mode
+### Choose XSS Mode
 
 ```bash
 # Basic (fewer payloads, faster)
 docker-compose run scanner target.com --xss-deep --xss-mode basic
 
-# Advanced (recommended)
+# Advanced (recommended for breakout detection)
 docker-compose run scanner target.com --xss-deep --xss-mode advanced
 
 # Exploitation / blind XSS (requires callback URL)
@@ -152,19 +180,194 @@ docker-compose run scanner target.com \
   --xss-callback https://your-callback.example/xss
 ```
 
-### Example: known vulnerable test site
+### Example: Known Vulnerable Test Sites
 
 ```bash
-docker-compose run scanner testphp.vulnweb.com \
+# testphp.vulnweb.com (basic reflected XSS)
+docker-compose run scanner "http://testphp.vulnweb.com/listproducts.php?cat=1" \
+  --xss-deep \
+  --skip-nuclei \
+  -f html
+
+# PortSwigger Web Security Academy (breakout XSS labs)
+docker-compose run scanner "https://YOUR-LAB-ID.web-security-academy.net/?search=test" \
   --xss-deep \
   --skip-nuclei \
   -f html
 ```
 
-This can detect, for example:
-- Reflected XSS in POST form input searchFor
-- Exposed admin panel
-- Exposed directories (e.g., /images/)
+### Breakout XSS Report Features
+
+The HTML report includes:
+- 🎯 **Breakout Context** - Highlighted yellow section showing context type (template literal, JSON, JS string)
+- 📝 **Code Snippets** - Exact source code showing where input is reflected
+- 🔐 **Encoding Layers** - List of detected encoding (URL, HTML, Unicode, etc.)
+- 💥 **Working Payloads** - The exact payload that bypassed filters
+- 📊 **CVSS Scoring** - Automated severity with reasoning
+- 🔧 **Reproduction Steps** - cURL commands and browser instructions
+- 🛡️ **Context-Specific Remediation** - Tailored security advice
+
+## 🧪 Setting Up Local Breakout XSS Test Environment
+
+To test the breakout detector with your own vulnerable pages, set up a local PHP server with Docker.
+
+### Method 1: Quick PHP Test (Docker CLI)
+
+```bash
+# Create a test PHP file
+mkdir test-breakout
+cd test-breakout
+
+# Create breakout-test.php
+cat > breakout-test.php << 'EOF'
+<?php
+$search = $_GET['search'] ?? '';
+?>
+<!DOCTYPE html>
+<html>
+<head><title>Breakout XSS Test</title></head>
+<body>
+<h1>Search Results</h1>
+
+<!-- JavaScript String Context - Single Quote -->
+<script>
+var searchTerm = '<?php echo addslashes($search); ?>';
+document.write('<p>Search: ' + searchTerm + '</p>');
+</script>
+
+<!-- Template Literal Context -->
+<script>
+const query = `<?php echo $search; ?>`;
+console.log('Query:', query);
+</script>
+
+<!-- JSON Context -->
+<script>
+var data = {"search": "<?php echo addslashes($search); ?>"};
+console.log('Data:', data);
+</script>
+
+</body>
+</html>
+EOF
+
+# Run PHP server in Docker
+docker run -d --name php-test -p 8080:80 -v "$(pwd):/var/www/html" php:8.2-apache
+
+# Scan the test page
+docker-compose run scanner "http://host.docker.internal:8080/breakout-test.php?search=test" --xss-deep --skip-nuclei -f html
+
+# Cleanup when done
+docker stop php-test
+docker rm php-test
+```
+
+### Method 2: Persistent PHP Environment (docker-compose)
+
+Add to your `docker-compose.yml`:
+
+```yaml
+services:
+  # ... existing services (zap, scanner) ...
+
+  php-test:
+    image: php:8.2-apache
+    ports:
+      - "8080:80"
+    volumes:
+      - ./test-breakout:/var/www/html
+    networks:
+      - scanner-network
+
+networks:
+  scanner-network:
+    driver: bridge
+```
+
+Then:
+
+```bash
+# Start PHP test server
+docker-compose up -d php-test
+
+# Create test files in ./test-breakout/
+mkdir -p test-breakout
+
+# Create various test scenarios
+cat > test-breakout/js-string.php << 'EOF'
+<?php
+$input = $_GET['q'] ?? '';
+?>
+<script>
+var userInput = '<?php echo addslashes($input); ?>';
+alert('Search: ' + userInput);
+</script>
+EOF
+
+cat > test-breakout/template.php << 'EOF'
+<?php
+$input = $_GET['q'] ?? '';
+?>
+<script>
+const msg = `User typed: ${<?php echo json_encode($input); ?>}`;
+console.log(msg);
+</script>
+EOF
+
+cat > test-breakout/json.php << 'EOF'
+<?php
+$input = $_GET['q'] ?? '';
+header('Content-Type: application/json');
+echo json_encode(['query' => $input]);
+?>
+EOF
+
+# Scan each test
+docker-compose run scanner "http://php-test/js-string.php?q=test" --xss-deep --skip-nuclei -f html
+docker-compose run scanner "http://php-test/template.php?q=test" --xss-deep --skip-nuclei -f html
+docker-compose run scanner "http://php-test/json.php?q=test" --xss-deep --skip-nuclei -f html
+```
+
+### Expected Breakout Detections
+
+**JavaScript String Context (`js-string.php`):**
+```
+✅ Context: js_string_single
+✅ Payload: ';alert(1);//
+✅ Type: breakout_xss
+```
+
+**Template Literal Context (`template.php`):**
+```
+✅ Context: js_template_literal
+✅ Payload: ${alert(1)}
+✅ Type: breakout_xss
+```
+
+**JSON Context (`json.php`):**
+```
+✅ Context: json_context
+✅ Payload: "};alert(1);//
+✅ Type: breakout_xss
+```
+
+### Manual Testing URLs
+
+Test your PHP server manually first:
+
+```bash
+# JavaScript String - should be blocked by addslashes()
+http://localhost:8080/js-string.php?q=<script>alert(1)</script>
+
+# But breakout payload should work:
+http://localhost:8080/js-string.php?q=%27;alert(1);//
+
+# Template literal - simple HTML blocked:
+http://localhost:8080/template.php?q=<script>alert(1)</script>
+
+# But template injection works:
+http://localhost:8080/template.php?q=${alert(1)}
+```
 
 ## 📊 Output and Reports
 
@@ -207,7 +410,10 @@ ls reports/
 dir reports
 
 # Open latest HTML report (Windows)
-start reports\my_scan_report.html
+start reports\report_*.html
+
+# Open latest HTML report (Linux/Mac)
+open reports/report_*.html
 ```
 
 ## 🐳 Running Against Local Apps (Docker Desktop)
@@ -220,10 +426,13 @@ Examples:
 
 ```bash
 # Juice Shop on host port 3000
-docker-compose run scanner host.docker.internal:3000 --xss-deep --xss-mode advanced -f html
+docker-compose run scanner "http://host.docker.internal:3000" --xss-deep --xss-mode advanced -f html
 
 # DVWA on host port 8090
-docker-compose run scanner host.docker.internal:8090 --xss-deep --skip-nuclei -f html
+docker-compose run scanner "http://host.docker.internal:8090" --xss-deep --skip-nuclei -f html
+
+# Local PHP test server on port 8080
+docker-compose run scanner "http://host.docker.internal:8080/test.php?search=test" --xss-deep --skip-nuclei -f html
 ```
 
 ## 📚 Advanced Usage Examples
@@ -293,6 +502,11 @@ zap:
   passive_scan: true           # Enable passive vulnerability detection
   active_scan: false           # Enable active scanning (invasive!)
   max_spider_depth: 5          # Maximum crawl depth
+
+xss:
+  mode: 'advanced'             # XSS scanning mode: basic, advanced, exploitation
+  timeout: 10                  # XSS request timeout
+  callback_url: null           # Blind XSS callback URL (e.g., Burp Collaborator)
 ```
 
 ### Docker Compose Services
@@ -345,7 +559,7 @@ services:
 - **Customizable**: Add custom templates for specific checks
 
 **Custom Scanners**
-- **XSS Scanner**: Tests common reflection points with payloads
+- **Enhanced Breakout XSS Scanner**: Context-aware detection with template literal, JSON, and multi-encoding support
 - **Admin Scanner**: Checks for `/admin`, `/wp-admin`, etc.
 - **Backup Scanner**: Looks for `.bak`, `.backup`, `.sql` files
 - **Directory Scanner**: Fuzzes for exposed S3, Azure, GCP buckets
@@ -384,10 +598,13 @@ services:
       "url": "https://example.com",
       "vulnerabilities": [
         {
-          "type": "xss",
-          "description": "Reflected XSS in search parameter",
+          "type": "breakout_xss",
+          "context_type": "js_string_single",
+          "description": "Breakout XSS in search parameter",
           "severity": "high",
-          "sources": ["ZAP", "XSS Scanner"]
+          "payload": "';alert(1);//",
+          "encoding_layers": ["javascript", "addslashes"],
+          "sources": ["Enhanced Breakout XSS Scanner"]
         }
       ]
     }
@@ -397,8 +614,10 @@ services:
 
 ### HTML
 - Styled web report with color-coded severity levels
+- Breakout context highlighted in yellow boxes
+- Code snippets showing exact reflection points
+- Encoding detection badges
 - Responsive design for mobile/desktop viewing
-- Sortable/filterable vulnerability lists
 - Source attribution for each finding
 
 ### Markdown
@@ -488,19 +707,25 @@ If you discover vulnerabilities:
 
 ```
 SecurityScanner/
-├── scanner.py              # Main orchestration script
-├── scanners/               # Modular scanner components
-│   ├── admin_scanner.py    # Admin panel detection
-│   ├── backup_scanner.py   # Backup file discovery
-│   ├── directory_scanner.py # Directory fuzzing & buckets
-│   ├── xss_scanner.py      # XSS vulnerability testing
-│   ├── zap_scanner.py      # ZAP API integration
-│   └── deduplicator.py     # Duplicate finding removal
-├── config.yaml             # Scanner configuration
-├── docker-compose.yml      # Service orchestration
-├── Dockerfile              # Scanner container build
-├── requirements.txt        # Python dependencies
-└── reports/                # Output directory (created at runtime)
+├── scanner.py                      # Main orchestration script
+├── scanners/                       # Modular scanner components
+│   ├── admin_scanner.py            # Admin panel detection
+│   ├── backup_scanner.py           # Backup file discovery
+│   ├── directory_scanner.py        # Directory fuzzing & buckets
+│   ├── xss_scanner.py              # Basic XSS vulnerability testing
+│   ├── xss_advanced.py             # Advanced XSS with context detection
+│   ├── xss_breakout_detector.py    # Enhanced breakout XSS detection engine
+│   ├── xss_breakout_scanner_patch.py  # Integration layer for breakout detection
+│   ├── xss_payloads.py             # Payload generation and categorization
+│   ├── param_discovery.py          # Arjun integration for hidden params
+│   ├── zap_scanner.py              # ZAP API integration
+│   └── deduplicator.py             # Duplicate finding removal
+├── config.yaml                     # Scanner configuration
+├── docker-compose.yml              # Service orchestration
+├── Dockerfile                      # Scanner container build
+├── requirements.txt                # Python dependencies
+├── reports/                        # Output directory (created at runtime)
+└── test-breakout/                  # Local PHP test files (optional)
 ```
 
 ## 🛠️ Troubleshooting
@@ -535,6 +760,44 @@ docker-compose up -d --build
 docker-compose run scanner which nuclei subfinder amass ffuf
 ```
 
+### No XSS Found on Known Vulnerable Site
+
+**Common issues:**
+
+1. **Wrong URL format** - Must include `http://` or `https://`
+   ```bash
+   # ❌ Wrong
+   docker-compose run scanner testphp.vulnweb.com/search.php
+   
+   # ✅ Correct
+   docker-compose run scanner "http://testphp.vulnweb.com/search.php?test=1"
+   ```
+
+2. **Target requires specific parameters**
+   ```bash
+   # Include known parameters
+   docker-compose run scanner "http://testphp.vulnweb.com/listproducts.php?cat=1"
+   ```
+
+3. **POST-only vulnerability** - Scanner primarily tests GET parameters
+   ```bash
+   # Test with form detection enabled (automatic with --xss-deep)
+   docker-compose run scanner "http://target.com/search.php" --xss-deep
+   ```
+
+### Breakout XSS Not Detected
+
+**Breakout XSS only triggers when:**
+- Simple payloads (`<script>alert(1)</script>`) are **blocked/encoded**
+- But context-specific payloads succeed
+
+If the report shows `context: html`, it's **not a breakout scenario** - simple payloads work, so no breakout is needed.
+
+**To test true breakout detection:**
+1. Use PortSwigger Web Security Academy labs with JavaScript string contexts
+2. Create local PHP test files with `addslashes()` or JSON encoding
+3. Test sites where HTML tags are stripped but JavaScript contexts exist
+
 ### No Subdomains Found
 
 - Verify target domain is correct
@@ -548,6 +811,22 @@ docker-compose run scanner which nuclei subfinder amass ffuf
 # Fix report directory permissions
 sudo chown -R $USER:$USER ./reports
 chmod -R 755 ./reports
+```
+
+### PHP Test Server Issues
+
+```bash
+# Check if PHP container is running
+docker ps | grep php-test
+
+# View PHP logs
+docker logs php-test
+
+# Restart PHP server
+docker restart php-test
+
+# Test PHP server directly
+curl http://localhost:8080/breakout-test.php?search=test
 ```
 
 ## 🔄 Updates & Maintenance
