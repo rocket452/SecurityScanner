@@ -1,0 +1,65 @@
+<html>
+<head>
+    <title>Breakout XSS Test Pages</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        li {
+            margin: 10px 0;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 5px;
+        }
+        a {
+            text-decoration: none;
+            color: #0066cc;
+            font-weight: bold;
+        }
+        a:hover {
+            color: #004499;
+        }
+        .description {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔍 Breakout XSS Test Pages</h1>
+    <p>These pages contain intentional XSS vulnerabilities for testing the SecurityScanner's breakout detection capabilities.</p>
+    
+    <ul>
+        <li>
+            <a href="breakout-test.php?search=test">Comprehensive Breakout Test</a>
+            <div class="description">Tests multiple contexts: JS string, template literal, and JSON</div>
+        </li>
+        <li>
+            <a href="js-string.php?q=test">JavaScript String Context Test</a>
+            <div class="description">Tests breakout from single-quoted JavaScript string with addslashes()</div>
+        </li>
+        <li>
+            <a href="template.php?q=test">Template Literal Test</a>
+            <div class="description">Tests template literal injection with ${} syntax</div>
+        </li>
+        <li>
+            <a href="json.php?q=test">JSON Context Test</a>
+            <div class="description">Tests breakout from JSON value context</div>
+        </li>
+    </ul>
+    
+    <h2>⚠️ Warning</h2>
+    <p style="color: #cc0000;">These pages are intentionally vulnerable. Do not deploy to production environments.</p>
+</body>
+</html>
