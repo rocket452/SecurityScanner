@@ -196,6 +196,30 @@ docker-compose run scanner "https://YOUR-LAB-ID.web-security-academy.net/?search
   -f html
 ```
 
+### Minimal Dockerized XSS Lab (Local)
+
+Spin up a tiny local PHP lab with intentionally vulnerable reflections.
+
+```bash
+cd labs/xss-minimal
+docker compose -f docker-compose.xss-lab.yml up -d
+```
+
+Then scan it:
+
+```bash
+docker-compose run scanner "http://host.docker.internal:8090/?q=test" \
+  --xss-deep \
+  --skip-nuclei \
+  -f html
+```
+
+Stop the lab when finished:
+
+```bash
+docker compose -f docker-compose.xss-lab.yml down
+```
+
 ### Breakout XSS Report Features
 
 The HTML report includes:

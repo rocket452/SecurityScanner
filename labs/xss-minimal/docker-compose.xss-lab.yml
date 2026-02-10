@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  xss-lab:
+    image: php:8.2-apache
+    container_name: xss-minimal-lab
+    ports:
+      - "8090:80"
+    volumes:
+      - ./public:/var/www/html:ro

