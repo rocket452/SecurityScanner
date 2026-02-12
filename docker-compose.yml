@@ -43,6 +43,17 @@ services:
     #   docker-compose run scanner --fetch-scope --h1-program shopify
     #   docker-compose run scanner --fetch-scope --h1-program github --zap
 
+  # Local PHP XSS test server (serves ./test-breakout)
+  php-test:
+    image: php:8.2-apache
+    container_name: securityscanner-php-test
+    ports:
+      - "8081:80"
+    volumes:
+      - ./test-breakout:/var/www/html
+    networks:
+      - scanner-network
+
 networks:
   scanner-network:
     driver: bridge

@@ -81,14 +81,17 @@ def main():
             log(f'📋 Custom Headers: {", ".join(f"{k}: {v}" for k, v in CUSTOM_HEADERS.items())}', 'INFO')
     
     # Log XSS scanning configuration if enabled
-    if args.xss_deep:
+    if getattr(args, 'xss_enabled', False):
         xss_mode = args.xss_mode or CONFIG.get('xss', {}).get('mode', 'advanced')
-        log(f'🔍 Enhanced Breakout XSS scanning enabled (mode: {xss_mode})', 'INFO')
+        safe_label = 'safe' if getattr(args, 'safe_mode', True) else 'unsafe'
+        standard_label = 'standard' if getattr(args, 'xss_standard_enabled', False) else 'no-standard'
+        breakout_label = 'breakout' if getattr(args, 'xss_breakout_enabled', False) else 'no-breakout'
+        log(f'?? XSS scanning enabled ({standard_label} + {breakout_label}) (mode: {xss_mode}, {safe_label})', 'INFO')
         if args.xss_payloads:
-            log(f'📝 Using custom XSS payloads from: {args.xss_payloads}', 'INFO')
+            log(f'?? Using custom XSS payloads from: {args.xss_payloads}', 'INFO')
         if args.xss_callback:
-            log(f'🔗 Blind XSS callback URL: {args.xss_callback}', 'INFO')
-    
+            log(f'?? Blind XSS callback URL: {args.xss_callback}', 'INFO')
+
     # Run with or without keep-awake based on flag
     if args.keep_awake:
         log('Keep-awake mode enabled - system will not sleep during scan', 'INFO')
@@ -290,6 +293,26 @@ Examples:
         help='Enable enhanced breakout XSS detection with template literals, JSON contexts, and multi-layer encoding analysis'
     )
     xss_group.add_argument(
+        '--no-xss',
+        action='store_true',
+        help='Disable all XSS scanning'
+    )
+    xss_group.add_argument(
+        '--no-xss-standard',
+        action='store_true',
+        help='Disable standard (reflected) XSS scanning'
+    )
+    xss_group.add_argument(
+        '--no-xss-breakout',
+        action='store_true',
+        help='Disable breakout XSS scanning'
+    )
+    xss_group.add_argument(
+        '--no-xss-stored',
+        action='store_true',
+        help='Disable stored XSS form workflow scanning'
+    )
+    xss_group.add_argument(
         '--xss-mode',
         choices=['basic', 'advanced', 'exploitation'],
         help='XSS scanning mode: basic (fast), advanced (comprehensive breakout detection), exploitation (blind XSS with callbacks)'
@@ -303,6 +326,56 @@ Examples:
         '--xss-callback',
         metavar='URL',
         help='Callback URL for blind XSS detection (e.g., Burp Collaborator, webhook.site)'
+    )
+    xss_group.add_argument(
+        '--safe',
+        action='store_true',
+        help='Enable safe mode for XSS scanning (bounded payloads, no bypasses)'
+    )
+    xss_group.add_argument(
+        '--unsafe',
+        action='store_true',
+        help='Disable safe mode for XSS scanning (more aggressive payloads)'
+    )
+    xss_group.add_argument(
+        '--arjun-threads',
+        type=int,
+        help='Arjun threads for parameter discovery'
+    )
+    xss_group.add_argument(
+        '--arjun-timeout',
+        type=int,
+        help='Arjun timeout in seconds for parameter discovery'
+    )
+    xss_group.add_argument(
+        '--arjun-wordlist',
+        metavar='FILE',
+        help='Custom wordlist for Arjun parameter discovery'
+    )
+    xss_group.add_argument(
+        '--crawl',
+        action='store_true',
+        help='Enable in-scope crawling for parameter discovery'
+    )
+    xss_group.add_argument(
+        '--no-crawl',
+        action='store_true',
+        help='Disable in-scope crawling for parameter discovery'
+    )
+    xss_group.add_argument(
+        '--crawl-pages',
+        type=int,
+        help='Maximum pages to crawl for parameter discovery'
+    )
+    xss_group.add_argument(
+        '--crawl-depth',
+        type=int,
+        help='Maximum crawl depth for parameter discovery'
+    )
+    xss_group.add_argument(
+        '--browser-verify',
+        action='store_true',
+        help='Verify DOM XSS execution using a headless browser (Playwright/Chromium). Slower but higher confidence.'
     )
     
     # Output options
@@ -365,6 +438,11 @@ Examples:
         action='store_true',
         help='Skip Nuclei scanning'
     )
+    scanner_group.add_argument(
+        '--xss-only',
+        action='store_true',
+        help='Run only XSS scanning (skip admin/backup/bucket/dir fuzzing and other scanners)'
+    )
     
     args = parser.parse_args()
     
@@ -378,6 +456,52 @@ Examples:
     # Validate XSS exploitation mode requires callback URL
     if args.xss_mode == 'exploitation' and not args.xss_callback:
         parser.error('--xss-mode exploitation requires --xss-callback URL')
+
+    if args.safe and args.unsafe:
+        parser.error('Choose either --safe or --unsafe, not both')
+    if args.crawl and args.no_crawl:
+        parser.error('Choose either --crawl or --no-crawl, not both')
+
+    # Resolve XSS safety and Arjun defaults from config
+    xss_config = CONFIG.get('xss', {})
+    safe_default = xss_config.get('safe_mode', True)
+    if args.safe:
+        args.safe_mode = True
+    elif args.unsafe:
+        args.safe_mode = False
+    else:
+        args.safe_mode = safe_default
+
+    # Resolve XSS enabled flags
+    standard_default = xss_config.get('standard_enabled', True)
+    breakout_default = xss_config.get('breakout_enabled', True)
+    stored_default = xss_config.get('stored_enabled', True)
+    if args.no_xss:
+        args.xss_standard_enabled = False
+        args.xss_breakout_enabled = False
+        args.xss_stored_enabled = False
+    else:
+        args.xss_standard_enabled = standard_default and not args.no_xss_standard
+        args.xss_breakout_enabled = breakout_default and not args.no_xss_breakout
+        args.xss_stored_enabled = stored_default and not args.no_xss_stored
+        if args.xss_deep:
+            args.xss_breakout_enabled = True
+
+    args.xss_enabled = args.xss_standard_enabled or args.xss_breakout_enabled or args.xss_stored_enabled
+
+    args.arjun_threads = args.arjun_threads or xss_config.get('arjun_threads', 10)
+    args.arjun_timeout = args.arjun_timeout or xss_config.get('arjun_timeout', 120)
+    args.arjun_wordlist = args.arjun_wordlist or xss_config.get('arjun_wordlist') or None
+    args.xss_fallback_params = xss_config.get('fallback_params', ['q', 'search', 'query', 'keyword', 'term', 'id', 'page', 'url', 'redirect', 'name'])
+    crawl_default = xss_config.get('crawl_enabled', True)
+    if args.crawl:
+        args.xss_crawl_enabled = True
+    elif args.no_crawl:
+        args.xss_crawl_enabled = False
+    else:
+        args.xss_crawl_enabled = crawl_default
+    args.xss_crawl_max_pages = args.crawl_pages or xss_config.get('crawl_max_pages', 25)
+    args.xss_crawl_max_depth = args.crawl_depth or xss_config.get('crawl_max_depth', 2)
     
     return args
 
@@ -401,6 +525,19 @@ def discover_all_subdomains(target):
     global ALL_SUBDOMAINS
     
     subdomains = []
+
+    # If a full URL is provided, skip subdomain discovery
+    try:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(target)
+        if parsed.scheme and parsed.netloc:
+            log(f'URL target detected, skipping subdomain discovery: {target}', 'INFO')
+            subdomains = [target]
+            ALL_SUBDOMAINS = subdomains
+            print_scan_summary(subdomains, target)
+            return subdomains
+    except Exception:
+        pass
     
     # Run discovery tools
     subdomains.extend(retrieve_sub_domains_from_subfinder(target))
@@ -427,8 +564,14 @@ def run_all_scans(subdomains, args):
     """Run all enabled vulnerability scans on discovered subdomains.
     Returns combined scan results from all scanners.
     """
-    # Probe for live domains
-    live_domains = probe_live_domains(subdomains)
+    # Probe for live domains unless we're doing an XSS-only debug run.
+    # In XSS-only mode, we want deterministic execution and logs even if probing is flaky.
+    if getattr(args, 'xss_only', False):
+        live_domains = []
+        for t in subdomains:
+            live_domains.append((t, True, None))
+    else:
+        live_domains = probe_live_domains(subdomains)
     
     # Initialize results
     all_results = {}
@@ -505,7 +648,7 @@ def generate_zap_report(output_file, args):
 
 def log(msg, level='INFO'):
     """Centralized logging function"""
-    print(f'[{level}] {msg}')
+    print(f'[{level}] {msg}', flush=True)
 
 # ============================================================================
 # SUBDOMAIN ENUMERATION
@@ -679,6 +822,66 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
         from scanners.admin_scanner import check_admin
         from scanners.backup_scanner import check_backup
         from scanners.directory_scanner import check_exposed_buckets, fuzz_directories
+
+        def _run_xss_scans() -> None:
+            # XSS scanning (standard reflected + breakout)
+            if not getattr(args, 'xss_enabled', False):
+                return
+
+            xss_config = CONFIG.get('xss', {})
+            xss_timeout = xss_config.get('timeout', 10)
+            xss_callback = args.xss_callback or xss_config.get('callback_url')
+            xss_mode = args.xss_mode or xss_config.get('mode', 'advanced')
+            max_payloads = xss_config.get('max_payloads_per_param', 20)
+            stored_enabled = xss_config.get('stored_enabled', True)
+
+            if getattr(args, 'xss_standard_enabled', False):
+                from scanners.xss_advanced import advanced_xss_scan
+                log(f'?? Running standard XSS scan on {url}', 'INFO')
+                standard_vulns = advanced_xss_scan(
+                    url=url,
+                    mode=xss_mode,
+                    custom_payloads_file=args.xss_payloads,
+                    callback_url=xss_callback,
+                    timeout=xss_timeout,
+                    enable_param_discovery=True,
+                    safe_mode=getattr(args, 'safe_mode', True),
+                    arjun_threads=getattr(args, 'arjun_threads', 10),
+                    arjun_timeout=getattr(args, 'arjun_timeout', 120),
+                    arjun_wordlist=getattr(args, 'arjun_wordlist', None),
+                    fallback_params=getattr(args, 'xss_fallback_params', None),
+                    max_payloads_per_param=max_payloads,
+                    enable_stored_workflow=getattr(args, 'xss_stored_enabled', stored_enabled),
+                    browser_verify=getattr(args, 'browser_verify', False)
+                )
+                if standard_vulns:
+                    for v in standard_vulns:
+                        v.setdefault('url', url)
+                        v.setdefault('sources', []).append('XSS Scanner')
+                        severity = v.get('severity', 'medium').upper()
+                        desc = v.get('description', 'XSS vulnerability')
+                        log(f'XSS [{severity}] on {url}: {desc}', 'VULN')
+                    vulns.extend(standard_vulns)
+
+            if getattr(args, 'xss_breakout_enabled', False):
+                from scanners.xss_breakout_scanner_patch import scan_for_breakout_xss
+                log(f'?? Running breakout XSS scan on {url}', 'INFO')
+                breakout_vulns = scan_for_breakout_xss(
+                    url=url,
+                    args=args,
+                    timeout=xss_timeout,
+                    callback_url=xss_callback
+                )
+                if breakout_vulns:
+                    for v in breakout_vulns:
+                        v.setdefault('url', url)
+                        v.setdefault('sources', []).append('XSS Scanner')
+                    vulns.extend(breakout_vulns)
+
+        # XSS-only mode: skip the long-running non-XSS scanners so runs complete quickly.
+        if getattr(args, 'xss_only', False):
+            _run_xss_scans()
+            return vulns
         
         # Admin panel detection
         if check_admin(url):
@@ -690,39 +893,8 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
             log(f'BACKUP on {url}', 'VULN')
         
-        # Enhanced Breakout XSS Detection - Use enhanced detector if --xss-deep is enabled
-        if args.xss_deep:
-            from scanners.xss_breakout_scanner_patch import scan_for_breakout_xss
-            
-            # Get XSS configuration
-            xss_timeout = CONFIG.get('xss', {}).get('timeout', 10)
-            xss_callback = args.xss_callback or CONFIG.get('xss', {}).get('callback_url')
-            
-            log(f'🎯 Running enhanced breakout XSS scan on {url}', 'INFO')
-            
-            breakout_vulns = scan_for_breakout_xss(
-                url=url,
-                args=args,
-                timeout=xss_timeout,
-                callback_url=xss_callback
-            )
-            
-            if breakout_vulns:
-                vulns.extend(breakout_vulns)
-        else:
-            # Use basic XSS scanner
-            from scanners.xss_scanner import check_xss
-            
-            xss_vulns = check_xss(url)
-            if xss_vulns:
-                for xss_vuln in xss_vulns:
-                    xss_vuln['url'] = url
-                vulns.extend(xss_vulns)
-                for xss_vuln in xss_vulns:
-                    severity = xss_vuln.get('severity', 'medium').upper()
-                    desc = xss_vuln.get('description', 'XSS vulnerability')
-                    log(f'XSS [{severity}] on {url}: {desc}', 'VULN')
-        
+        _run_xss_scans()
+
         # Exposed buckets/storage detection (scanner module handles its own logging)
         bucket_results = check_exposed_buckets(url)
         
@@ -846,6 +1018,20 @@ def probe_live_domains(domains):
     
     with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
         for domain in sorted(domains):
+            # If already a full URL, probe it directly
+            if domain.startswith('http://') or domain.startswith('https://'):
+                try:
+                    resp = client.get(domain)
+                    if 200 <= resp.status_code < 500:
+                        live_domains.append((domain, True, resp.status_code))
+                        print(f'✅ {domain} ({resp.status_code})')
+                    else:
+                        live_domains.append((domain, False, resp.status_code))
+                except Exception as e:
+                    log(f'{domain} unreachable: {str(e)[:50]}', 'DEBUG')
+                    live_domains.append((domain, False, None))
+                continue
+
             for proto in ['https', 'http']:
                 try:
                     url = f'{proto}://{domain}'

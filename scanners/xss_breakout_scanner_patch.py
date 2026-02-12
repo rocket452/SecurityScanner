@@ -52,7 +52,15 @@ def scan_for_breakout_xss(url: str,
         url=url,
         use_arjun=use_arjun,
         timeout=timeout,
-        callback_url=callback_url
+        callback_url=callback_url,
+        safe_mode=getattr(args, 'safe_mode', True),
+        arjun_threads=getattr(args, 'arjun_threads', 10),
+        arjun_timeout=getattr(args, 'arjun_timeout', 120),
+        arjun_wordlist=getattr(args, 'arjun_wordlist', None),
+        fallback_params=getattr(args, 'xss_fallback_params', None),
+        crawl_enabled=getattr(args, 'xss_crawl_enabled', True),
+        crawl_max_pages=getattr(args, 'xss_crawl_max_pages', 25),
+        crawl_max_depth=getattr(args, 'xss_crawl_max_depth', 2)
     )
     
     # Format vulnerabilities for main scanner report

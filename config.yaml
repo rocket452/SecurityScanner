@@ -50,8 +50,8 @@ rate_limiting:
   
   # HTTP request timeout (seconds)
   # Default: 10
-  # Range: 5 (fast sites) to 30 (slow sites)
-  http_timeout: 10
+  # Range: 5 (fast sites) to 120 (slow sites)
+  http_timeout: 120
   
   # Delay between requests (milliseconds)
   # Default: 0 (no delay)
@@ -85,8 +85,20 @@ zap:
 
 xss:
   mode: advanced  # Options: basic, advanced, exploitation
-  timeout: 10  # Request timeout in seconds
+  timeout: 120  # Request timeout in seconds
   callback_url: null  # For blind XSS detection (e.g., Burp Collaborator)
+  safe_mode: true  # Safer, bounded payloads by default
+  standard_enabled: true  # Run standard (reflected) XSS scanning by default
+  breakout_enabled: true  # Run breakout XSS scanning by default
+  stored_enabled: true  # Attempt stored XSS form workflows by default
+  max_payloads_per_param: 20  # Limit payloads per parameter to balance coverage vs. load
+  arjun_threads: 10
+  arjun_timeout: 120
+  arjun_wordlist: ./wordlists/arjun_params.txt  # Optional custom wordlist path
+  fallback_params: ["q", "search", "query", "keyword", "term", "id", "page", "url", "redirect", "name"]
+  crawl_enabled: true
+  crawl_max_pages: 100
+  crawl_max_depth: 3
 
 # ==============================================================================
 # AI REPORT GENERATION

