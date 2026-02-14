@@ -74,6 +74,11 @@ def main():
     
     # Parse arguments
     args = parse_arguments()
+
+    # HAR inventory mode: build endpoint/parameter inventory and exit (no scanning).
+    if getattr(args, 'har', None):
+        run_har_inventory(args)
+        return
     
     # Log bug bounty program info if configured
     bug_bounty_config = CONFIG.get('bug_bounty', {})
@@ -111,6 +116,38 @@ def main():
             run_scan(args)
     else:
         run_scan(args)
+
+
+def run_har_inventory(args) -> None:
+    from scanners.har_inventory import build_inventory_from_har, write_inventory_outputs
+    import urllib.parse
+
+    scopes = list(getattr(args, 'har_allow_host', []) or [])
+    if getattr(args, 'target', None):
+        t = str(args.target)
+        if t.startswith(("http://", "https://")):
+            scopes.append(urllib.parse.urlparse(t).netloc)
+        else:
+            scopes.append(t)
+
+    redact = not bool(getattr(args, 'har_no_redact', False))
+    items = build_inventory_from_har(
+        har_path=args.har,
+        scopes=scopes,
+        include_headers=bool(getattr(args, 'har_include_headers', False)),
+        redact=redact,
+    )
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    text_out = getattr(args, 'har_out', None) or str(Path("reports") / f"har_inventory_{ts}.txt")
+    json_out = getattr(args, 'har_json_out', None)
+    text_path, json_path = write_inventory_outputs(items, text_out=text_out, json_out=json_out)
+
+    log(f"HAR inventory entries: {len(items)}", "OK" if items else "WARN")
+    if text_path:
+        log(f"Inventory text saved to: {text_path}", "INFO")
+    if json_path:
+        log(f"Inventory JSON saved to: {json_path}", "INFO")
 
 def run_scan(args):
     """Execute the main scan workflow."""
@@ -402,6 +439,37 @@ Examples:
         action='store_true',
         help='Run static DOM audit for common DOM XSS source/sink flows (e.g. location.hash -> innerHTML)'
     )
+
+    # Traffic import options (inventory only, no scanning)
+    traffic_group = parser.add_argument_group('Traffic Import (Inventory)')
+    traffic_group.add_argument(
+        '--har',
+        help='Path to a browser-exported HAR file. When set, the tool will build an endpoint/parameter inventory and exit.'
+    )
+    traffic_group.add_argument(
+        '--har-out',
+        help='Write inventory text output to this path (default: ./reports/har_inventory_<timestamp>.txt)'
+    )
+    traffic_group.add_argument(
+        '--har-json-out',
+        help='Write inventory JSON output to this path (optional)'
+    )
+    traffic_group.add_argument(
+        '--har-allow-host',
+        action='append',
+        default=[],
+        help='Additional host/domain to treat as in-scope for HAR filtering (repeatable)'
+    )
+    traffic_group.add_argument(
+        '--har-include-headers',
+        action='store_true',
+        help='Include request header names in the inventory (values are never written)'
+    )
+    traffic_group.add_argument(
+        '--har-no-redact',
+        action='store_true',
+        help='Do not redact query parameter values in sample URLs'
+    )
     
     # Output options
     output_group = parser.add_argument_group('Output Options')
@@ -483,12 +551,17 @@ Examples:
     
     args = parser.parse_args()
     
-    # Validation: require either target or --fetch-scope
-    if not args.fetch_scope and not args.target:
-        parser.error('Either provide a target domain or use --fetch-scope with --h1-program')
+    # Validation: require either target or --fetch-scope, unless running in HAR inventory mode.
+    if not args.har and not args.fetch_scope and not args.target:
+        parser.error('Either provide a target domain/URL, use --fetch-scope with --h1-program, or use --har')
     
     if args.fetch_scope and not args.h1_program:
         parser.error('--fetch-scope requires --h1-program')
+
+    if args.har:
+        # In HAR mode, require an explicit scope: either a target or at least one allow-host.
+        if not args.target and not getattr(args, 'har_allow_host', []):
+            parser.error('--har requires either a positional target (domain/URL) or one or more --har-allow-host values')
     
     # Validate XSS exploitation mode requires callback URL
     if args.xss_mode == 'exploitation' and not args.xss_callback:
