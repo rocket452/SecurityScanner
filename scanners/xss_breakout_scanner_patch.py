@@ -26,7 +26,8 @@ def log(msg: str, level: str = 'INFO'):
 def scan_for_breakout_xss(url: str, 
                           args,
                           timeout: int = 10,
-                          callback_url: Optional[str] = None) -> List[Dict]:
+                          callback_url: Optional[str] = None,
+                          headers: Optional[Dict[str, str]] = None) -> List[Dict]:
     """
     Perform breakout XSS scanning on a URL
     
@@ -52,6 +53,7 @@ def scan_for_breakout_xss(url: str,
         url=url,
         use_arjun=use_arjun,
         timeout=timeout,
+        headers=headers,
         callback_url=callback_url,
         safe_mode=getattr(args, 'safe_mode', True),
         arjun_threads=getattr(args, 'arjun_threads', 10),

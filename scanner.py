@@ -60,6 +60,7 @@ ALL_SUBDOMAINS = []
 
 # Get custom headers from bug bounty config
 CUSTOM_HEADERS = CONFIG.get('bug_bounty', {}).get('custom_headers', {})
+REQUEST_HEADERS = None
 
 # ============================================================================
 # MAIN EXECUTION
@@ -107,6 +108,11 @@ def main():
             log('?? ReturnPath DOM XSS workflow enabled', 'INFO')
         if getattr(args, 'xss_dom_audit', False):
             log('?? Static DOM XSS audit enabled', 'INFO')
+
+    # Log auth/session config (never log values).
+    if getattr(args, 'headers_file', None) or getattr(args, 'cookie', None):
+        header_names = sorted(list((REQUEST_HEADERS or {}).keys()))
+        log(f"Auth/session headers enabled: {', '.join(header_names) if header_names else '(none)'}", 'INFO')
 
     # Run with or without keep-awake based on flag
     if args.keep_awake:
@@ -488,6 +494,17 @@ Examples:
         action='store_true',
         help='Skip saving report to file (console only)'
     )
+
+    # Auth/session options
+    auth_group = parser.add_argument_group('Auth/Session Options')
+    auth_group.add_argument(
+        '--headers-file',
+        help='Path to a JSON file of headers to include with every request (values may include auth tokens).'
+    )
+    auth_group.add_argument(
+        '--cookie',
+        help='Cookie header value to include with every request (example: \"session=...; csrftoken=...\").'
+    )
     
     # System options
     system_group = parser.add_argument_group('System Options')
@@ -603,6 +620,7 @@ Examples:
         or args.xss_breakout_enabled
         or args.xss_stored_enabled
         or getattr(args, 'xss_returnpath', False)
+        or getattr(args, 'xss_dom_audit', False)
     )
 
     args.arjun_threads = args.arjun_threads or xss_config.get('arjun_threads', 10)
@@ -618,6 +636,33 @@ Examples:
         args.xss_crawl_enabled = crawl_default
     args.xss_crawl_max_pages = args.crawl_pages or xss_config.get('crawl_max_pages', 25)
     args.xss_crawl_max_depth = args.crawl_depth or xss_config.get('crawl_max_depth', 2)
+
+    # Build effective request headers (custom headers + user-provided auth/session headers).
+    def _load_headers_file(path: str) -> dict:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                obj = json.load(f)
+        except Exception as e:
+            parser.error(f'Failed to read --headers-file: {e}')
+        if not isinstance(obj, dict):
+            parser.error('--headers-file must be a JSON object of header-name -> value')
+        out = {}
+        for k, v in obj.items():
+            if k is None:
+                continue
+            out[str(k)] = '' if v is None else str(v)
+        return out
+
+    effective = {}
+    if CUSTOM_HEADERS:
+        effective.update(CUSTOM_HEADERS)
+    if getattr(args, 'headers_file', None):
+        effective.update(_load_headers_file(args.headers_file))
+    if getattr(args, 'cookie', None):
+        effective['Cookie'] = str(args.cookie)
+
+    global REQUEST_HEADERS
+    REQUEST_HEADERS = effective or None
     
     return args
 
@@ -1064,6 +1109,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     custom_payloads_file=args.xss_payloads,
                     callback_url=xss_callback,
                     timeout=xss_timeout,
+                    headers=REQUEST_HEADERS,
                     enable_param_discovery=True,
                     safe_mode=getattr(args, 'safe_mode', True),
                     arjun_threads=getattr(args, 'arjun_threads', 10),
@@ -1090,7 +1136,8 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     url=url,
                     args=args,
                     timeout=xss_timeout,
-                    callback_url=xss_callback
+                    callback_url=xss_callback,
+                    headers=REQUEST_HEADERS,
                 )
                 if breakout_vulns:
                     for v in breakout_vulns:
@@ -1105,7 +1152,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     dom_vulns = scan_dom_xss_hash(
                         base_url=url,
                         timeout_s=xss_timeout,
-                        headers=CUSTOM_HEADERS.copy() if CUSTOM_HEADERS else None,
+                        headers=REQUEST_HEADERS,
                     )
                     if dom_vulns:
                         for v in dom_vulns:
@@ -1124,6 +1171,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                         base_url=url,
                         feedback_path=getattr(args, 'xss_returnpath_feedback_path', None),
                         timeout_s=xss_timeout,
+                        headers=REQUEST_HEADERS,
                         headed=False,
                         slow_mo_ms=0,
                     )
@@ -1192,7 +1240,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             link_discovered = discover_paths_from_links(
                 url,
                 timeout=CONFIG.get('rate_limiting', {}).get('http_timeout', 10),
-                headers=CUSTOM_HEADERS.copy() if CUSTOM_HEADERS else None,
+                headers=REQUEST_HEADERS,
             )
         except Exception:
             link_discovered = []

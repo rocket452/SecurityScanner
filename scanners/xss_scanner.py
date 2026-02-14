@@ -11,7 +11,7 @@ from .xss_payloads import XSSPayloads
 # Browser verification (Playwright)
 # -----------------------------------------------------------------------------
 
-def verify_alert_with_playwright(url: str, timeout_s: int = 12) -> bool:
+def verify_alert_with_playwright(url: str, timeout_s: int = 12, headers: Dict[str, str] = None) -> bool:
     """
     High-confidence verification by executing the page in a headless browser
     and checking for an alert dialog.
@@ -26,7 +26,8 @@ def verify_alert_with_playwright(url: str, timeout_s: int = 12) -> bool:
         triggered = {'dialog': False}
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            context = browser.new_context(extra_http_headers=headers or None)
+            page = context.new_page()
 
             def on_dialog(dialog):
                 triggered['dialog'] = True
@@ -40,6 +41,10 @@ def verify_alert_with_playwright(url: str, timeout_s: int = 12) -> bool:
             page.wait_for_timeout(800)
             try:
                 page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
             except Exception:
                 pass
             try:

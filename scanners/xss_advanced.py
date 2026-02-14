@@ -193,7 +193,7 @@ def _harvest_params_from_html(base_url: str, html: str) -> List[str]:
     return _filter_param_names(list(param_names))
 
 
-def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int) -> List[str]:
+def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int, headers: Optional[Dict[str, str]] = None) -> List[str]:
     """
     Fetch in-scope JS files and harvest params from them.
     """
@@ -204,7 +204,7 @@ def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int) -> L
         return []
 
     params = set()
-    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
         for src in script_srcs:
             try:
                 full_url = urllib.parse.urljoin(base_url, src)
@@ -380,10 +380,17 @@ class ExploitationProofGenerator:
             Curl command string
         """
         cmd = f"curl -X {method}"
-        
+
+        def _redact_header_value(name: str, value: str) -> str:
+            n = (name or "").lower()
+            if n in ("cookie", "authorization", "proxy-authorization", "x-api-key", "x-auth-token"):
+                return "<redacted>"
+            return value
+
         if headers:
             for key, value in headers.items():
-                cmd += f" -H '{key}: {value}'"
+                safe_val = _redact_header_value(str(key), "" if value is None else str(value))
+                cmd += f" -H '{key}: {safe_val}'"
         
         if method == 'GET' and data:
             query = urllib.parse.urlencode(data)
@@ -598,6 +605,7 @@ def advanced_xss_scan(url: str,
                       custom_payloads_file: Optional[str] = None,
                       callback_url: Optional[str] = None,
                       timeout: int = 10,
+                      headers: Optional[Dict[str, str]] = None,
                       enable_param_discovery: bool = True,
                       safe_mode: bool = True,
                       arjun_threads: int = 10,
@@ -643,7 +651,7 @@ def advanced_xss_scan(url: str,
     log(f"Using {len(base_payloads)} payloads", 'INFO')
     
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
             # Initial request to analyze CSP and get forms
             initial_response = client.get(url)
             
@@ -672,7 +680,8 @@ def advanced_xss_scan(url: str,
             harvested.extend(_harvest_params_from_js_sources(
                 f"{parsed.scheme}://{parsed.netloc}{parsed.path}",
                 initial_response.text,
-                timeout
+                timeout,
+                headers=headers,
             ))
             harvested_count_total = len(harvested)
             filtered_harvested = _filter_param_names(harvested) if harvested else []
@@ -918,7 +927,7 @@ def advanced_xss_scan(url: str,
                                     verify_url = str(response.url)
                                     minimal_url = _build_minimal_get_exploit_url(url, base_url, param_name, payload)
                                     log(f"Browser-verifying potential client-side XSS: {verify_url}", 'INFO')
-                                    ok = verify_alert_with_playwright(verify_url)
+                                    ok = verify_alert_with_playwright(verify_url, headers=headers)
                                     browser_verifications += 1
                                     log(f"Browser verification result: {ok}", 'INFO')
                                     if ok:
