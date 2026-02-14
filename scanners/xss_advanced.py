@@ -819,7 +819,7 @@ def advanced_xss_scan(url: str,
                             
                             # Generate exploitation proof
                             curl_cmd = ExploitationProofGenerator.generate_curl_command(
-                                'GET', base_url, flat_params
+                                'GET', base_url, flat_params, headers=headers
                             )
                             
                             browser_steps = ExploitationProofGenerator.generate_browser_steps(
@@ -882,7 +882,7 @@ def advanced_xss_scan(url: str,
                                             severity, score, reasoning = SeverityScorer.calculate_severity(vuln_data)
 
                                             curl_cmd = ExploitationProofGenerator.generate_curl_command(
-                                                'GET', base_url, flat_variant
+                                                'GET', base_url, flat_variant, headers=headers
                                             )
                                             browser_steps = ExploitationProofGenerator.generate_browser_steps(
                                                 'GET', str(response_variant.url), param_name, variant
@@ -1024,7 +1024,7 @@ def advanced_xss_scan(url: str,
                                                     response_variant = client.get(form_url, params=form_data_variant)
                                                 if variant in response_variant.text and is_xss_vulnerable(response_variant.text, variant):
                                                     curl_cmd = ExploitationProofGenerator.generate_curl_command(
-                                                        form['method'], form_url, form_data_variant
+                                                        form['method'], form_url, form_data_variant, headers=headers
                                                     )
                                                     browser_steps = ExploitationProofGenerator.generate_browser_steps(
                                                         form['method'], str(response_variant.url), field_name, variant
