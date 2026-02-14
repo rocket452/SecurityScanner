@@ -445,20 +445,9 @@ def _guess_reflection_context(text: str, payload: str) -> str:
 
 
 def _is_reflected_unescaped(response_text: str, payload: str) -> bool:
-    if payload not in response_text:
-        return False
-    encoded_variants = {
-        html_escape.escape(payload, quote=True),
-        payload.replace('<', '&lt;').replace('>', '&gt;'),
-        payload.replace('<', '&#60;').replace('>', '&#62;'),
-        payload.replace('<', '&#x3C;').replace('>', '&#x3E;'),
-        urllib.parse.quote(payload),
-        urllib.parse.quote(urllib.parse.quote(payload)),
-    }
-    for encoded in encoded_variants:
-        if encoded and encoded in response_text:
-            return False
-    return True
+    # If the raw payload is present anywhere, we consider it unescaped enough to analyze.
+    # Some pages reflect both raw and escaped variants; rejecting on escaped presence creates false negatives.
+    return payload in response_text
 
 
 def is_xss_vulnerable(response_text: str, payload: str) -> bool:

@@ -23,6 +23,7 @@ from .xss_scanner import FormParser, extract_forms, log, test_dom_xss, verify_al
 from .param_discovery import discover_parameters
 
 SEARCH_PRIORITY_PAYLOAD = '\"><svg onload=alert(1)>'
+SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD = '"onmouseover="alert(1)'
 PAYLOAD_DEBUG_LOG_LIMIT = 5  # Per-parameter, to avoid log spam
 MAX_BROWSER_VERIFICATIONS_PER_TARGET = 3
 
@@ -242,20 +243,15 @@ class ContextDetector:
         if marker not in response_text:
             return 'unknown'
         
-        # Find position of marker
-        pos = response_text.find(marker)
-        
-        # Get context around marker (200 chars before and after)
-        start = max(0, pos - 200)
-        end = min(len(response_text), pos + len(marker) + 200)
-        context = response_text[start:end]
-        
+        # Conservative approach: if the marker appears in multiple places (common),
+        # classify by the most dangerous context we can find anywhere in the response.
+        context = response_text
+
         # Detect JavaScript context
         js_patterns = [
             r'<script[^>]*>.*?' + re.escape(marker),
             r'var\s+\w+\s*=\s*["\']?' + re.escape(marker),
             r'function\s*\([^)]*\)\s*{[^}]*' + re.escape(marker),
-            r'on\w+\s*=\s*["\'][^"\'\']*' + re.escape(marker),
         ]
         
         for pattern in js_patterns:
@@ -669,6 +665,10 @@ def advanced_xss_scan(url: str,
             # Parse URL parameters
             parsed = urllib.parse.urlparse(url)
             params = urllib.parse.parse_qs(parsed.query)
+            baseline_params = dict(params)
+
+            def _copy_baseline_params() -> Dict[str, List[str]]:
+                return {k: (list(v) if isinstance(v, list) else [str(v)]) for k, v in baseline_params.items()}
 
             # Harvest params from HTML/JS
             log("Harvesting parameters from HTML/JS...", 'INFO')
@@ -747,7 +747,7 @@ def advanced_xss_scan(url: str,
             
             # Detect context for each parameter
             for param_name in params.keys():
-                test_params = params.copy()
+                test_params = _copy_baseline_params()
                 test_params[param_name] = [marker]
                 flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
                 
@@ -787,10 +787,11 @@ def advanced_xss_scan(url: str,
                     )
 
                 debug_attempts_logged = 0
+                adaptive_used = False
                 
                 for payload in context_payloads[:max_payloads_per_param]:  # Limit to prevent excessive requests
                     attempted_payloads += 1
-                    test_params = params.copy()
+                    test_params = _copy_baseline_params()
                     test_params[param_name] = [payload]
                     flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
                     
@@ -857,6 +858,9 @@ def advanced_xss_scan(url: str,
                             log(f"XSS FOUND: {param_name} (severity: {severity}, score: {score}, discovered via: {discovery_method})", 'VULN')
                             break  # Move to next parameter after finding vulnerability
                         elif reflected:
+                            if adaptive_used:
+                                continue
+                            adaptive_used = True
                             observed_context = _guess_reflection_context(response.text, payload)
                             if debug_attempts_logged <= PAYLOAD_DEBUG_LOG_LIMIT:
                                 log(
@@ -865,9 +869,14 @@ def advanced_xss_scan(url: str,
                                 )
                             adaptive_payloads = [payload] + _adaptive_candidate_payloads(observed_context, safe_mode=safe_mode)
                             for ap in adaptive_payloads:
-                                for variant in _adaptive_prefix_variants(ap, observed_context):
+                                variants = [ap] + _adaptive_prefix_variants(ap, observed_context)
+                                seen_v = set()
+                                for variant in variants:
+                                    if variant in seen_v:
+                                        continue
+                                    seen_v.add(variant)
                                     attempted_payloads += 1
-                                    test_params_variant = params.copy()
+                                    test_params_variant = _copy_baseline_params()
                                     test_params_variant[param_name] = [variant]
                                     flat_variant = {k: v[0] if isinstance(v, list) else v for k, v in test_params_variant.items()}
                                     try:
@@ -983,7 +992,8 @@ def advanced_xss_scan(url: str,
                         field_name = input_field['name']
                         
                         # Test with basic payloads for forms
-                        for payload in XSSPayloads.get_basic_payloads():
+                        adaptive_used_form = False
+                        for payload in XSSPayloads.get_basic_payloads()[:max_payloads_per_param]:
                             attempted_payloads += 1
                             form_data = {}
                             for inp in form['inputs']:
@@ -1010,10 +1020,18 @@ def advanced_xss_scan(url: str,
                                     log(f"XSS FOUND: Form input {field_name}", 'VULN')
                                     break
                                 elif payload in response.text:
+                                    if adaptive_used_form:
+                                        continue
+                                    adaptive_used_form = True
                                     observed_context = _guess_reflection_context(response.text, payload)
                                     adaptive_payloads = [payload] + _adaptive_candidate_payloads(observed_context, safe_mode=safe_mode)
                                     for ap in adaptive_payloads:
-                                        for variant in _adaptive_prefix_variants(ap, observed_context):
+                                        variants = [ap] + _adaptive_prefix_variants(ap, observed_context)
+                                        seen_v = set()
+                                        for variant in variants:
+                                            if variant in seen_v:
+                                                continue
+                                            seen_v.add(variant)
                                             try:
                                                 attempted_payloads += 1
                                                 form_data_variant = form_data.copy()
@@ -1161,20 +1179,9 @@ def _guess_reflection_context(text: str, payload: str) -> str:
 
 
 def _is_reflected_unescaped(response_text: str, payload: str) -> bool:
-    if payload not in response_text:
-        return False
-    encoded_variants = {
-        html_escape.escape(payload, quote=True),
-        payload.replace('<', '&lt;').replace('>', '&gt;'),
-        payload.replace('<', '&#60;').replace('>', '&#62;'),
-        payload.replace('<', '&#x3C;').replace('>', '&#x3E;'),
-        urllib.parse.quote(payload),
-        urllib.parse.quote(urllib.parse.quote(payload)),
-    }
-    for encoded in encoded_variants:
-        if encoded and encoded in response_text:
-            return False
-    return True
+    # If the raw payload is present anywhere, we consider it unescaped enough to analyze.
+    # Some pages reflect both raw and escaped variants; rejecting on escaped presence creates false negatives.
+    return payload in response_text
 
 
 def is_xss_vulnerable(response_text: str, payload: str, expected_context: Optional[str] = None) -> bool:
@@ -1193,7 +1200,10 @@ def is_xss_vulnerable(response_text: str, payload: str, expected_context: Option
     # We keep safety by only relaxing to closely-related contexts.
     if expected_context:
         if expected_context == 'javascript' and actual_context != 'javascript':
-            return False
+            # Reflections often occur in multiple contexts; do not drop an attribute-context
+            # candidate just because a script-context reflection was seen first.
+            if actual_context != 'attribute':
+                return False
         if expected_context == 'attribute' and actual_context != 'attribute':
             return False
         if expected_context == 'css' and actual_context not in ('css', 'attribute'):
@@ -1233,7 +1243,7 @@ def _prioritize_payloads_for_param(param_name: str, payloads: List[str]) -> List
     """
     if param_name.lower() != 'search':
         return payloads
-    ordered = [SEARCH_PRIORITY_PAYLOAD]
+    ordered = [SEARCH_PRIORITY_PAYLOAD, SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD]
     for payload in payloads:
         if payload not in ordered:
             ordered.append(payload)
@@ -1246,8 +1256,10 @@ def _adaptive_candidate_payloads(context: str, safe_mode: bool = True) -> List[s
     """
     if context in ('attribute', 'html'):
         candidates = []
+        candidates.append(SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD)
         candidates.extend(XSSPayloads.HTML_CONTEXT)
         candidates.extend(XSSPayloads.EVENT_HANDLERS)
+        candidates.extend(XSSPayloads.ATTRIBUTE_BASED)
         if not safe_mode:
             candidates.extend(XSSPayloads.FILTER_BYPASS)
         # Deduplicate while preserving order

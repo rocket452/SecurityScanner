@@ -391,6 +391,11 @@ Examples:
         help='Callback URL for blind XSS detection (e.g., Burp Collaborator, webhook.site)'
     )
     xss_group.add_argument(
+        '--xss-max-payloads',
+        type=int,
+        help='Maximum payloads to try per parameter (overrides config xss.max_payloads_per_param)'
+    )
+    xss_group.add_argument(
         '--safe',
         action='store_true',
         help='Enable safe mode for XSS scanning (bounded payloads, fewer bypasses)'
@@ -1098,7 +1103,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             xss_timeout = xss_config.get('timeout', 10)
             xss_callback = args.xss_callback or xss_config.get('callback_url')
             xss_mode = args.xss_mode or xss_config.get('mode', 'advanced')
-            max_payloads = xss_config.get('max_payloads_per_param', 20)
+            max_payloads = getattr(args, 'xss_max_payloads', None) or xss_config.get('max_payloads_per_param', 20)
             stored_enabled = xss_config.get('stored_enabled', True)
 
             if getattr(args, 'xss_standard_enabled', False):

