@@ -12,6 +12,13 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Avoid Windows console UnicodeEncodeError crashes (cp1252, etc.).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -91,6 +98,10 @@ def main():
             log(f'?? Using custom XSS payloads from: {args.xss_payloads}', 'INFO')
         if args.xss_callback:
             log(f'?? Blind XSS callback URL: {args.xss_callback}', 'INFO')
+        if getattr(args, 'xss_returnpath', False):
+            log('?? ReturnPath DOM XSS workflow enabled', 'INFO')
+        if getattr(args, 'xss_dom_audit', False):
+            log('?? Static DOM XSS audit enabled', 'INFO')
 
     # Run with or without keep-awake based on flag
     if args.keep_awake:
@@ -293,6 +304,15 @@ Examples:
         help='Enable enhanced breakout XSS detection with template literals, JSON contexts, and multi-layer encoding analysis'
     )
     xss_group.add_argument(
+        '--xss-returnpath',
+        action='store_true',
+        help='Run specialized DOM XSS check for returnPath reflected into href (PortSwigger lab workflow)'
+    )
+    xss_group.add_argument(
+        '--xss-returnpath-feedback-path',
+        help='Feedback page path for returnPath DOM XSS check (default: auto-discover or /feedback)'
+    )
+    xss_group.add_argument(
         '--no-xss',
         action='store_true',
         help='Disable all XSS scanning'
@@ -377,6 +397,11 @@ Examples:
         action='store_true',
         help='Verify DOM XSS execution using a headless browser (Playwright/Chromium). Slower but higher confidence.'
     )
+    xss_group.add_argument(
+        '--xss-dom-audit',
+        action='store_true',
+        help='Run static DOM audit for common DOM XSS source/sink flows (e.g. location.hash -> innerHTML)'
+    )
     
     # Output options
     output_group = parser.add_argument_group('Output Options')
@@ -387,8 +412,8 @@ Examples:
     output_group.add_argument(
         '-f', '--format',
         choices=['json', 'html', 'markdown', 'csv'],
-        default='json',
-        help='Report format (default: json)'
+        default='html',
+        help='Report format (default: html)'
     )
     output_group.add_argument(
         '--no-file',
@@ -443,6 +468,18 @@ Examples:
         action='store_true',
         help='Run only XSS scanning (skip admin/backup/bucket/dir fuzzing and other scanners)'
     )
+    scanner_group.add_argument(
+        '--path-scan-depth',
+        type=int,
+        default=0,
+        help='Recursively scan discovered internal paths (from links + fuzzing) up to this depth (default: 0 = disabled)'
+    )
+    scanner_group.add_argument(
+        '--path-scan-max-urls',
+        type=int,
+        default=40,
+        help='Maximum number of URLs to scan per root target when --path-scan-depth is enabled (default: 40)'
+    )
     
     args = parser.parse_args()
     
@@ -480,14 +517,20 @@ Examples:
         args.xss_standard_enabled = False
         args.xss_breakout_enabled = False
         args.xss_stored_enabled = False
+        args.xss_returnpath = False
     else:
         args.xss_standard_enabled = standard_default and not args.no_xss_standard
         args.xss_breakout_enabled = breakout_default and not args.no_xss_breakout
         args.xss_stored_enabled = stored_default and not args.no_xss_stored
         if args.xss_deep:
             args.xss_breakout_enabled = True
-
-    args.xss_enabled = args.xss_standard_enabled or args.xss_breakout_enabled or args.xss_stored_enabled
+    
+    args.xss_enabled = (
+        args.xss_standard_enabled
+        or args.xss_breakout_enabled
+        or args.xss_stored_enabled
+        or getattr(args, 'xss_returnpath', False)
+    )
 
     args.arjun_threads = args.arjun_threads or xss_config.get('arjun_threads', 10)
     args.arjun_timeout = args.arjun_timeout or xss_config.get('arjun_timeout', 120)
@@ -598,13 +641,112 @@ def run_all_scans(subdomains, args):
     
     return scan_results
 
+def _normalize_url_for_recursion(url: str) -> str:
+    """Canonicalize URL for visited-set comparisons (drop query/fragment)."""
+    try:
+        import urllib.parse
+        p = urllib.parse.urlparse(url)
+        return urllib.parse.urlunparse((p.scheme, p.netloc, p.path or '/', '', '', ''))
+    except Exception:
+        return url
+
+def _should_recurse_url(root_url: str, candidate_url: str) -> bool:
+    """Limit recursion to same-origin, non-static, likely-interesting paths."""
+    try:
+        import urllib.parse
+        root = urllib.parse.urlparse(root_url)
+        c = urllib.parse.urlparse(candidate_url)
+    except Exception:
+        return False
+
+    if c.scheme not in ('http', 'https'):
+        return False
+    if c.netloc != root.netloc:
+        return False
+
+    path = c.path or '/'
+    if not path.startswith('/'):
+        path = '/' + path
+
+    # Skip obvious static asset files.
+    last = path.rsplit('/', 1)[-1]
+    if '.' in last:
+        ext = last.rsplit('.', 1)[-1].lower()
+        allowed_dynamic = {'php', 'asp', 'aspx', 'jsp', 'html', 'htm'}
+        if ext not in allowed_dynamic:
+            return False
+
+    # Skip very common static directories to keep recursion focused.
+    seg = path.strip('/').split('/', 1)[0].lower() if path.strip('/') else ''
+    skip_dirs = {'resources', 'static', 'assets', 'images', 'img', 'css', 'js', 'fonts', 'image', 'media'}
+    if seg in skip_dirs:
+        return False
+
+    return True
+
+def _extract_discovered_endpoints_from_vulns(vulns):
+    """Pull URLs we discovered during scanning that are worth scanning next."""
+    endpoints = []
+    for v in vulns or []:
+        ep = v.get('endpoint')
+        if not ep:
+            continue
+        endpoints.append(ep)
+    return endpoints
+
+def scan_with_path_recursion(root_url: str, args, skip_nuclei: bool = False):
+    """
+    Scan a root URL, then recursively scan discovered internal paths up to args.path_scan_depth.
+    Returns a list of (url, vulns) entries suitable for report generation.
+    """
+    from collections import deque
+    import urllib.parse
+
+    max_depth = max(0, int(getattr(args, 'path_scan_depth', 0) or 0))
+    max_urls = max(1, int(getattr(args, 'path_scan_max_urls', 40) or 40))
+
+    visited = set()
+    results = []
+    q = deque([(root_url, 0)])
+
+    while q and len(visited) < max_urls:
+        url, depth = q.popleft()
+        norm = _normalize_url_for_recursion(url)
+        if norm in visited:
+            continue
+        visited.add(norm)
+
+        vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+        results.append((url, vulns))
+
+        if depth >= max_depth:
+            continue
+
+        for child in _extract_discovered_endpoints_from_vulns(vulns):
+            # Drop query/fragment for recursion to avoid blowing up the URL space.
+            child_norm = _normalize_url_for_recursion(child)
+            if child_norm in visited:
+                continue
+            if not _should_recurse_url(root_url, child_norm):
+                continue
+            # Use the normalized URL to keep recursion stable.
+            q.append((child_norm, depth + 1))
+
+    if q and len(visited) >= max_urls:
+        log(f'Path recursion hit max URL limit ({max_urls}); {len(q)} remaining in queue not scanned', 'WARN')
+
+    return results
+
 def run_traditional_scans(live_domains, args, skip_nuclei=False):
     """Run traditional vulnerability scanners on live domains."""
     scan_results = []
     for url, is_live, status_code in live_domains:
         if is_live:
-            vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
-            scan_results.append((url, vulns))
+            if getattr(args, 'path_scan_depth', 0) and not getattr(args, 'xss_only', False):
+                scan_results.extend(scan_with_path_recursion(url, args, skip_nuclei=skip_nuclei))
+            else:
+                vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+                scan_results.append((url, vulns))
     
     return scan_results
 
@@ -648,7 +790,12 @@ def generate_zap_report(output_file, args):
 
 def log(msg, level='INFO'):
     """Centralized logging function"""
-    print(f'[{level}] {msg}', flush=True)
+    try:
+        print(f'[{level}] {msg}', flush=True)
+    except UnicodeEncodeError:
+        # Some Windows consoles default to cp1252 and cannot print emoji or other Unicode.
+        safe = f'[{level}] {msg}'.encode('ascii', errors='backslashreplace').decode('ascii', errors='ignore')
+        print(safe, flush=True)
 
 # ============================================================================
 # SUBDOMAIN ENUMERATION
@@ -821,7 +968,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
         # Import scanners from scanners package
         from scanners.admin_scanner import check_admin
         from scanners.backup_scanner import check_backup
-        from scanners.directory_scanner import check_exposed_buckets, fuzz_directories
+        from scanners.directory_scanner import check_exposed_buckets, fuzz_directories, discover_paths_from_links
 
         def _run_xss_scans() -> None:
             # XSS scanning (standard reflected + breakout)
@@ -878,6 +1025,43 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                         v.setdefault('sources', []).append('XSS Scanner')
                     vulns.extend(breakout_vulns)
 
+            if getattr(args, 'xss_dom_audit', False):
+                try:
+                    from scanners.dom_xss_hash_detector import scan_dom_xss_hash
+                    log(f'?? Running static DOM audit on {url}', 'INFO')
+                    dom_vulns = scan_dom_xss_hash(
+                        base_url=url,
+                        timeout_s=xss_timeout,
+                        headers=CUSTOM_HEADERS.copy() if CUSTOM_HEADERS else None,
+                    )
+                    if dom_vulns:
+                        for v in dom_vulns:
+                            v.setdefault('url', url)
+                            v.setdefault('sources', []).append('XSS Scanner')
+                        vulns.extend(dom_vulns)
+                        log(f'Static DOM audit produced {len(dom_vulns)} potential finding(s)', 'VULN')
+                except Exception as e:
+                    log(f'Static DOM audit error: {str(e)[:120]}', 'WARN')
+
+            if getattr(args, 'xss_returnpath', False):
+                try:
+                    from scanners.dom_xss_returnpath import check_returnpath_dom_xss
+                    log(f'?? Running returnPath DOM XSS workflow on {url}', 'INFO')
+                    returnpath_vuln = check_returnpath_dom_xss(
+                        base_url=url,
+                        feedback_path=getattr(args, 'xss_returnpath_feedback_path', None),
+                        timeout_s=xss_timeout,
+                        headed=False,
+                        slow_mo_ms=0,
+                    )
+                    if returnpath_vuln:
+                        returnpath_vuln.setdefault('url', url)
+                        returnpath_vuln.setdefault('sources', []).append('XSS Scanner')
+                        vulns.append(returnpath_vuln)
+                        log('DOM XSS returnPath workflow confirmed', 'VULN')
+                except Exception as e:
+                    log(f'ReturnPath DOM XSS workflow error: {str(e)[:120]}', 'WARN')
+
         # XSS-only mode: skip the long-running non-XSS scanners so runs complete quickly.
         if getattr(args, 'xss_only', False):
             _run_xss_scans()
@@ -908,6 +1092,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     vulns.append({
                         'type': 'exposed_storage',
                         'description': f'Exposed directory listing: {full_url}',
+                        'endpoint': full_url,
                         'status_code': status,
                         'severity': 'high',
                         'url': url
@@ -917,6 +1102,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     vulns.append({
                         'type': 'accessible_path',
                         'description': f'Accessible path: {full_url}',
+                        'endpoint': full_url,
                         'status_code': status,
                         'severity': 'medium',
                         'url': url
@@ -927,6 +1113,36 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     log(f'PATH EXISTS (forbidden): {full_url} [{status}]', 'INFO')
         
         # Recursive directory fuzzing (scanner module handles its own logging)
+        # Also try quick link-based discovery so we can pick up obvious endpoints like "/feedback"
+        # even when wordlist fuzzing times out or is blocked.
+        try:
+            link_discovered = discover_paths_from_links(
+                url,
+                timeout=CONFIG.get('rate_limiting', {}).get('http_timeout', 10),
+                headers=CUSTOM_HEADERS.copy() if CUSTOM_HEADERS else None,
+            )
+        except Exception:
+            link_discovered = []
+
+        if link_discovered:
+            log(f'Discovered {len(link_discovered)} path(s) from on-page links/forms', 'OK')
+            shown = 0
+            for path, status in link_discovered:
+                if status.startswith('2') or status.startswith('3'):
+                    from urllib.parse import urljoin
+                    full_path_url = urljoin(url, path)
+                    vulns.append({
+                        'type': 'discovered_path',
+                        'description': f'Discovered path (link-based): {full_path_url}',
+                        'endpoint': full_path_url,
+                        'status_code': int(status),
+                        'severity': 'low',
+                        'url': url
+                    })
+                    shown += 1
+                    if shown <= 10:
+                        log(f'LINK: {full_path_url} [{status}]', 'VULN')
+
         discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
         
         if discovered:
@@ -942,6 +1158,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     vulns.append({
                         'type': 'discovered_path',
                         'description': f'Discovered path: {full_path_url}',
+                        'endpoint': full_path_url,
                         'status_code': int(status),
                         'severity': 'low',
                         'url': url
@@ -1022,28 +1239,38 @@ def probe_live_domains(domains):
             if domain.startswith('http://') or domain.startswith('https://'):
                 try:
                     resp = client.get(domain)
+                    # Treat any HTTP response as "live" (even 5xx) so scans can still run on flaky targets.
+                    live_domains.append((domain, True, resp.status_code))
                     if 200 <= resp.status_code < 500:
-                        live_domains.append((domain, True, resp.status_code))
                         print(f'✅ {domain} ({resp.status_code})')
                     else:
-                        live_domains.append((domain, False, resp.status_code))
+                        print(f'⚠️  {domain} ({resp.status_code})')
                 except Exception as e:
                     log(f'{domain} unreachable: {str(e)[:50]}', 'DEBUG')
                     live_domains.append((domain, False, None))
                 continue
 
+            found = False
+            last_err = None
             for proto in ['https', 'http']:
+                url = f'{proto}://{domain}'
                 try:
-                    url = f'{proto}://{domain}'
                     resp = client.get(url)
-                    
+                    live_domains.append((url, True, resp.status_code))
                     if 200 <= resp.status_code < 500:
-                        live_domains.append((url, True, resp.status_code))
                         print(f'✅ {url} ({resp.status_code})')
-                        break
-                        
+                    else:
+                        print(f'⚠️  {url} ({resp.status_code})')
+                    found = True
+                    break
                 except Exception as e:
+                    last_err = e
                     log(f'{url} unreachable: {str(e)[:50]}', 'DEBUG')
+
+            if not found:
+                if last_err is not None:
+                    log(f'{domain} unreachable: {str(last_err)[:50]}', 'DEBUG')
+                live_domains.append((domain, False, None))
     
     return live_domains
 

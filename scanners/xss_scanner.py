@@ -65,6 +65,7 @@ XSS_PAYLOADS = [
     "<textarea onfocus=alert('XSS') autofocus>",
     "<marquee onstart=alert('XSS')>",
     "javascript:alert('XSS')",
+    "javascript:alert(document.cookie)",
     "<script>alert(document.domain)</script>",
     "<img src='x' onerror='alert(1)'>",
     "<<SCRIPT>alert('XSS');//<</SCRIPT>",
