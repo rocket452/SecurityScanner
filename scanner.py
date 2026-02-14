@@ -393,12 +393,12 @@ Examples:
     xss_group.add_argument(
         '--safe',
         action='store_true',
-        help='Enable safe mode for XSS scanning (bounded payloads, no bypasses)'
+        help='Enable safe mode for XSS scanning (bounded payloads, fewer bypasses)'
     )
     xss_group.add_argument(
         '--unsafe',
         action='store_true',
-        help='Disable safe mode for XSS scanning (more aggressive payloads)'
+        help='Force unsafe mode for XSS scanning (more aggressive payloads)'
     )
     xss_group.add_argument(
         '--arjun-threads',
@@ -591,7 +591,8 @@ Examples:
 
     # Resolve XSS safety and Arjun defaults from config
     xss_config = CONFIG.get('xss', {})
-    safe_default = xss_config.get('safe_mode', True)
+    # Default to unsafe unless config explicitly enables safe_mode.
+    safe_default = xss_config.get('safe_mode', False)
     if args.safe:
         args.safe_mode = True
     elif args.unsafe:
