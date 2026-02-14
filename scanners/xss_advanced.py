@@ -24,6 +24,8 @@ from .param_discovery import discover_parameters
 
 SEARCH_PRIORITY_PAYLOAD = '\"><svg onload=alert(1)>'
 SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD = '"onmouseover="alert(1)'
+ATTR_EVENT_HANDLER_TECHNIQUE_ID = "xss_attr_event_handler_breakout"
+ATTR_EVENT_HANDLER_TECHNIQUE_NAME = "Quoted attribute breakout with injected event handler"
 PAYLOAD_DEBUG_LOG_LIMIT = 5  # Per-parameter, to avoid log spam
 MAX_BROWSER_VERIFICATIONS_PER_TARGET = 3
 
@@ -853,6 +855,10 @@ def advanced_xss_scan(url: str,
                                     'poc_html': poc_html,
                                 },
                             }
+                            # Tag specific lab-derived technique when we inject an attribute event handler breakout.
+                            if isinstance(payload, str) and 'onmouseover' in payload.lower():
+                                vuln['technique_id'] = ATTR_EVENT_HANDLER_TECHNIQUE_ID
+                                vuln['technique_name'] = ATTR_EVENT_HANDLER_TECHNIQUE_NAME
                             
                             vulnerabilities.append(vuln)
                             log(f"XSS FOUND: {param_name} (severity: {severity}, score: {score}, discovered via: {discovery_method})", 'VULN')
@@ -919,6 +925,9 @@ def advanced_xss_scan(url: str,
                                                     'poc_html': poc_html,
                                                 },
                                             }
+                                            if isinstance(variant, str) and 'onmouseover' in variant.lower():
+                                                vuln_data['technique_id'] = ATTR_EVENT_HANDLER_TECHNIQUE_ID
+                                                vuln_data['technique_name'] = ATTR_EVENT_HANDLER_TECHNIQUE_NAME
                                             vulnerabilities.append(vuln_data)
                                             log(f"XSS FOUND (adaptive): {param_name} (context: {observed_context})", 'VULN')
                                             break

@@ -126,6 +126,8 @@ def check_returnpath_dom_xss(
 
             return {
                 "type": "dom_xss",
+                "technique_id": "dom_xss_returnpath_href_js",
+                "technique_name": "returnPath reflected into href and executed via javascript: URL",
                 "method": "GET",
                 "parameter": "returnPath",
                 "payload": "javascript:alert(document.cookie)",

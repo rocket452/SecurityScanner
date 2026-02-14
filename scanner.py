@@ -1717,6 +1717,18 @@ def save_html_report(report_data, output_file):
                     
                     # Add XSS-specific details (for all XSS types)
                     if vuln.get('type', '').lower().endswith('xss'):
+                        # Technique tags (lab-derived strategy IDs)
+                        technique_id = vuln.get('technique_id')
+                        technique_name = vuln.get('technique_name')
+                        if technique_id or technique_name:
+                            html += '            <div class="detail-section">\n'
+                            html += '                <h4>Technique</h4>\n'
+                            if technique_name:
+                                html += f'                <div class="code-block">{html_escape.escape(str(technique_name))}</div>\n'
+                            if technique_id:
+                                html += f'                <div style="margin-top: 6px; font-size: 12px; color: #666;"><strong>ID:</strong> {html_escape.escape(str(technique_id))}</div>\n'
+                            html += '            </div>\n'
+
                         # Payload
                         payload = vuln.get('payload')
                         if payload:
