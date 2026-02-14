@@ -7,6 +7,7 @@ import yaml
 import json
 import csv
 import os
+import re
 import html as html_escape
 from datetime import datetime
 from pathlib import Path
@@ -1453,6 +1454,10 @@ def save_report(scan_results, target, output_file=None, format='json'):
     if output_file is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_target = target.replace('://', '_').replace('/', '_').replace('.', '_')
+        # Windows-friendly: strip querystrings and replace invalid filename chars.
+        safe_target = safe_target.split('?', 1)[0]
+        safe_target = safe_target.split('#', 1)[0]
+        safe_target = re.sub(r'[^A-Za-z0-9_\\-]+', '_', safe_target)
         output_file = reports_dir / f'report_{safe_target}_{timestamp}.{format}'
     else:
         output_file = Path(output_file)
