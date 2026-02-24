@@ -88,6 +88,40 @@ SecurityScanner automates the discovery and assessment of web application vulner
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Overall Scanner Process
+
+The runtime flow in `scanner.py` is:
+
+1. Parse args and load config
+- Inputs are normalized from CLI flags, `config.yaml`, and optional auth headers/cookies.
+- If `--har` is provided, the scanner runs inventory-only mode and exits after writing HAR inventory output.
+
+2. Resolve targets
+- Manual mode: uses the positional target.
+- HackerOne mode: `--fetch-scope --h1-program <handle>` pulls scope, filters assets, and extracts scannable hosts.
+
+3. Discover scan candidates per target
+- If the target is already a full URL, subdomain discovery is skipped.
+- Otherwise it runs Subfinder + Amass, adds the base domain, then deduplicates.
+
+4. Probe live URLs
+- Uses `httpx` probing (HTTPS first, then HTTP for hostnames) to determine reachable scan URLs.
+- In `--xss-only` mode, probing is bypassed so XSS workflows run deterministically.
+
+5. Execute vulnerability scanners
+- Optional ZAP branch: spider/passive scan by default, active scan only when enabled.
+- Traditional branch: admin panel checks, backup file checks, XSS scans (standard, breakout, optional DOM workflows), exposed bucket/path checks, link discovery, recursive directory fuzzing, and optional Nuclei.
+- Optional recursive path expansion (`--path-scan-depth`) can rescan discovered same-origin endpoints.
+
+6. Aggregate and deduplicate findings
+- Results from all scanners and all targets are merged.
+- `scanners/deduplicator.py` removes duplicate findings and keeps scanner source attribution.
+
+7. Generate output
+- Console vulnerability summary is always printed.
+- File report is written unless `--no-file` is set (default format: HTML; also JSON/Markdown/CSV).
+- When ZAP is enabled, an additional ZAP HTML report can be generated alongside the main report.
+
 ## 🚀 Quick Start
 
 ### 1. Clone and build
