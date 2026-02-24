@@ -87,7 +87,7 @@ xss:
   mode: advanced  # Options: basic, advanced, exploitation
   timeout: 120  # Request timeout in seconds
   callback_url: null  # For blind XSS detection (e.g., Burp Collaborator)
-  safe_mode: true  # Safer, bounded payloads by default
+  safe_mode: false  # Unsafe by default; use --safe for bounded payloads
   standard_enabled: true  # Run standard (reflected) XSS scanning by default
   breakout_enabled: true  # Run breakout XSS scanning by default
   stored_enabled: true  # Attempt stored XSS form workflows by default

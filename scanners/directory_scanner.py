@@ -5,6 +5,8 @@ import re
 import httpx
 import yaml
 import time
+from html.parser import HTMLParser
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 # Load configuration
 def load_config():
@@ -25,6 +27,161 @@ CONFIG = load_config()
 
 def log(msg, level='INFO'):
     print(f'[{level}] {msg}')
+
+
+class _LinkExtractor(HTMLParser):
+    """Extract candidate internal URLs from common HTML attributes."""
+
+    def __init__(self):
+        super().__init__()
+        self.urls: List[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs or [])
+
+        # Common navigational/resource attributes that often contain interesting paths.
+        if tag in ('a', 'link'):
+            val = attrs_dict.get('href')
+            if val:
+                self.urls.append(val)
+        elif tag in ('script', 'img', 'iframe', 'source', 'video', 'audio'):
+            val = attrs_dict.get('src')
+            if val:
+                self.urls.append(val)
+        elif tag == 'form':
+            val = attrs_dict.get('action')
+            if val:
+                self.urls.append(val)
+
+
+def _extract_internal_paths_from_html(base_url: str, html: str, max_candidates: int = 250) -> List[str]:
+    """
+    Parse HTML and extract unique internal paths (e.g. "/feedback") for the same origin.
+    """
+    if not html:
+        return []
+
+    try:
+        base = urllib.parse.urlparse(base_url)
+    except Exception:
+        return []
+
+    parser = _LinkExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        # HTMLParser can throw on some malformed input; best-effort only.
+        return []
+
+    # Filter out obvious static assets, but keep "page-like" endpoints (e.g. .php).
+    static_exts = {
+        'css', 'js', 'map',
+        'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'ico',
+        'woff', 'woff2', 'ttf', 'eot', 'otf',
+        'mp4', 'mp3', 'wav', 'avi', 'mov', 'mpeg', 'webm',
+        'pdf', 'zip', 'gz', 'tgz', 'rar', '7z',
+    }
+
+    paths: Set[str] = set()
+    for raw in parser.urls[: max_candidates * 3]:
+        raw = (raw or '').strip()
+        if not raw:
+            continue
+
+        # Skip non-HTTP navigations.
+        lowered = raw.lower()
+        if lowered.startswith(('javascript:', 'mailto:', 'tel:', 'data:')):
+            continue
+
+        # Resolve relative URLs against base.
+        abs_url = urllib.parse.urljoin(base_url, raw)
+        try:
+            parsed = urllib.parse.urlparse(abs_url)
+        except Exception:
+            continue
+
+        # Keep only same-origin URLs (avoid probing external domains).
+        if parsed.scheme not in ('http', 'https'):
+            continue
+        if parsed.netloc and parsed.netloc != base.netloc:
+            continue
+
+        path = parsed.path or '/'
+        if not path.startswith('/'):
+            path = '/' + path
+
+        # Normalize some noise.
+        if path == '//':
+            path = '/'
+
+        # Always add the first path segment as a "subdirectory guess" (e.g. "/resources", "/feedback").
+        # This catches cases where only a deep static asset is linked ("/resources/css/app.css"),
+        # but the top-level directory is still useful to discover.
+        seg = path.strip('/').split('/', 1)[0] if path.strip('/') else ''
+        if seg:
+            paths.add('/' + seg)
+
+        # Also keep the full path when it doesn't look like a static asset.
+        last = path.rsplit('/', 1)[-1]
+        ext = last.rsplit('.', 1)[-1].lower() if '.' in last else ''
+        is_static_asset = bool(ext) and ext in static_exts
+
+        if path != '/' and not is_static_asset:
+            paths.add(path)
+
+    # Prefer shorter paths first (more likely to be top-level endpoints like /feedback).
+    return sorted(paths, key=lambda p: (p.count('/'), len(p), p))
+
+
+def discover_paths_from_links(
+    url: str,
+    timeout: Optional[int] = None,
+    headers: Optional[Dict[str, str]] = None,
+    max_probe: int = 60,
+) -> List[Tuple[str, str]]:
+    """
+    Fetch a page, extract internal link/form/resource paths, then probe them.
+
+    Returns: list of (path, status_code_str) for paths that appear to exist (non-404).
+    """
+    discovered: List[Tuple[str, str]] = []
+    timeout = timeout or CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
+    request_delay = CONFIG.get('rate_limiting', {}).get('request_delay', 0) / 1000.0  # ms -> s
+
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
+            resp = client.get(url)
+            html = resp.text if resp.status_code < 500 else ''
+
+            candidates = _extract_internal_paths_from_html(url, html)
+            if not candidates:
+                log('Link-based discovery: extracted 0 internal paths', 'INFO')
+                return discovered
+
+            probe = candidates[:max_probe]
+            log(f'Link-based discovery: extracted {len(candidates)} internal paths, probing {len(probe)}', 'INFO')
+
+            for path in probe:
+                try:
+                    if request_delay > 0:
+                        time.sleep(request_delay)
+
+                    test_url = urllib.parse.urljoin(url.rstrip('/') + '/', path.lstrip('/'))
+                    r = client.get(test_url)
+                    if r.status_code != 404:
+                        discovered.append((path, str(r.status_code)))
+                except httpx.HTTPError:
+                    continue
+
+    except Exception as e:
+        log(f'Link-based discovery error: {str(e)[:100]}', 'WARN')
+
+    if discovered:
+        log(f'Link-based discovery: found {len(discovered)} existing path(s)', 'OK')
+    else:
+        log('Link-based discovery: no existing paths found (non-404) from probed candidates', 'INFO')
+
+    return discovered
 
 def check_exposed_buckets(url):
     """

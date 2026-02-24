@@ -106,7 +106,7 @@ def _harvest_params_from_html(base_url: str, html: str) -> List[str]:
     return _filter_param_names(list(param_names))
 
 
-def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int) -> List[str]:
+def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int, headers: Optional[Dict[str, str]] = None) -> List[str]:
     """
     Fetch in-scope JS files and harvest params from them.
     """
@@ -117,7 +117,7 @@ def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int) -> L
         return []
 
     params = set()
-    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
         for src in script_srcs:
             try:
                 full_url = urllib.parse.urljoin(base_url, src)
@@ -136,7 +136,7 @@ def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int) -> L
     return _filter_param_names(list(params))
 
 
-def _crawl_in_scope_urls(start_url: str, max_pages: int, max_depth: int, timeout: int) -> List[Tuple[str, str]]:
+def _crawl_in_scope_urls(start_url: str, max_pages: int, max_depth: int, timeout: int, headers: Optional[Dict[str, str]] = None) -> List[Tuple[str, str]]:
     """
     Lightweight in-scope crawler that returns (url, html) tuples.
     """
@@ -152,7 +152,7 @@ def _crawl_in_scope_urls(start_url: str, max_pages: int, max_depth: int, timeout
     queue = deque()
     queue.append((start_url, 0))
 
-    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
         while queue and len(results) < max_pages:
             url, depth = queue.popleft()
             if url in visited or depth > max_depth:
@@ -210,7 +210,7 @@ def extract_url_parameters(url: str) -> List[Tuple[str, str]]:
     return [(param_name, 'GET') for param_name in params.keys()]
 
 
-def discover_form_parameters(url: str, timeout: int = 10) -> List[Tuple[str, str, Dict]]:
+def discover_form_parameters(url: str, timeout: int = 10, headers: Optional[Dict[str, str]] = None) -> List[Tuple[str, str, Dict]]:
     """
     Discover POST parameters by fetching the page and parsing forms
     
@@ -222,7 +222,7 @@ def discover_form_parameters(url: str, timeout: int = 10) -> List[Tuple[str, str
         List of (param_name, method, form_data) tuples
     """
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
             response = client.get(url)
 
             forms = extract_forms(response.text)
@@ -257,6 +257,7 @@ def discover_form_parameters(url: str, timeout: int = 10) -> List[Tuple[str, str
 def scan_url_for_breakout_xss(url: str,
                                use_arjun: bool = True,
                                timeout: int = 10,
+                               headers: Optional[Dict[str, str]] = None,
                                callback_url: Optional[str] = None,
                                safe_mode: bool = True,
                                arjun_threads: int = 10,
@@ -299,20 +300,20 @@ def scan_url_for_breakout_xss(url: str,
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
         harvested = set()
-        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
             response = client.get(url)
         harvested.update(_harvest_params_from_html(base_url, response.text))
-        harvested.update(_harvest_params_from_js_sources(base_url, response.text, timeout))
+        harvested.update(_harvest_params_from_js_sources(base_url, response.text, timeout, headers=headers))
 
         if crawl_enabled:
-            crawled = _crawl_in_scope_urls(base_url, crawl_max_pages, crawl_max_depth, timeout)
+            crawled = _crawl_in_scope_urls(base_url, crawl_max_pages, crawl_max_depth, timeout, headers=headers)
             for crawled_url, html in crawled:
                 # params from URL itself
                 parsed_c = urllib.parse.urlparse(crawled_url)
                 harvested.update(urllib.parse.parse_qs(parsed_c.query).keys())
                 # params from HTML/JS
                 harvested.update(_harvest_params_from_html(crawled_url, html))
-                harvested.update(_harvest_params_from_js_sources(crawled_url, html, timeout))
+                harvested.update(_harvest_params_from_js_sources(crawled_url, html, timeout, headers=headers))
             log(f"Crawled {len(crawled)} page(s) for parameter harvesting", 'INFO')
 
         if harvested:
@@ -344,7 +345,7 @@ def scan_url_for_breakout_xss(url: str,
             log(f"Arjun parameter discovery failed: {str(e)}", 'WARN')
     
     # Step 3: Discover POST parameters from forms
-    form_params = discover_form_parameters(url, timeout=timeout)
+    form_params = discover_form_parameters(url, timeout=timeout, headers=headers)
     log(f"Found {len(form_params)} form parameter(s)", 'INFO')
 
     # Promote GET form params into URL param list
@@ -372,6 +373,7 @@ def scan_url_for_breakout_xss(url: str,
             param_name=param_name,
             method='GET',
             timeout=timeout,
+            headers=headers,
             callback_url=callback_url,
             safe_mode=safe_mode
         )
@@ -399,6 +401,7 @@ def scan_url_for_breakout_xss(url: str,
             method='POST',
             form_data=form_data,
             timeout=timeout,
+            headers=headers,
             callback_url=callback_url,
             safe_mode=safe_mode
         )

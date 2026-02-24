@@ -480,6 +480,7 @@ def detect_breakout_xss(url: str,
                         method: str = 'GET',
                         form_data: Dict = None,
                         timeout: int = 10,
+                        headers: Optional[Dict[str, str]] = None,
                         callback_url: str = None,
                         safe_mode: bool = True) -> Optional[Dict]:
     """
@@ -502,7 +503,7 @@ def detect_breakout_xss(url: str,
     marker = "__BREAKOUT_TEST_MARKER_" + str(hash(url + str(param_name)))[-8:] + "__"
     
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
             
             # Step 1: Test with marker to identify context
             if method == 'GET':

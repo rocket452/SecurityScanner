@@ -11,7 +11,7 @@ from .xss_payloads import XSSPayloads
 # Browser verification (Playwright)
 # -----------------------------------------------------------------------------
 
-def verify_alert_with_playwright(url: str, timeout_s: int = 12) -> bool:
+def verify_alert_with_playwright(url: str, timeout_s: int = 12, headers: Dict[str, str] = None) -> bool:
     """
     High-confidence verification by executing the page in a headless browser
     and checking for an alert dialog.
@@ -26,7 +26,8 @@ def verify_alert_with_playwright(url: str, timeout_s: int = 12) -> bool:
         triggered = {'dialog': False}
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            context = browser.new_context(extra_http_headers=headers or None)
+            page = context.new_page()
 
             def on_dialog(dialog):
                 triggered['dialog'] = True
@@ -40,6 +41,10 @@ def verify_alert_with_playwright(url: str, timeout_s: int = 12) -> bool:
             page.wait_for_timeout(800)
             try:
                 page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
             except Exception:
                 pass
             try:
@@ -65,6 +70,7 @@ XSS_PAYLOADS = [
     "<textarea onfocus=alert('XSS') autofocus>",
     "<marquee onstart=alert('XSS')>",
     "javascript:alert('XSS')",
+    "javascript:alert(document.cookie)",
     "<script>alert(document.domain)</script>",
     "<img src='x' onerror='alert(1)'>",
     "<<SCRIPT>alert('XSS');//<</SCRIPT>",
@@ -439,20 +445,9 @@ def _guess_reflection_context(text: str, payload: str) -> str:
 
 
 def _is_reflected_unescaped(response_text: str, payload: str) -> bool:
-    if payload not in response_text:
-        return False
-    encoded_variants = {
-        html_escape.escape(payload, quote=True),
-        payload.replace('<', '&lt;').replace('>', '&gt;'),
-        payload.replace('<', '&#60;').replace('>', '&#62;'),
-        payload.replace('<', '&#x3C;').replace('>', '&#x3E;'),
-        urllib.parse.quote(payload),
-        urllib.parse.quote(urllib.parse.quote(payload)),
-    }
-    for encoded in encoded_variants:
-        if encoded and encoded in response_text:
-            return False
-    return True
+    # If the raw payload is present anywhere, we consider it unescaped enough to analyze.
+    # Some pages reflect both raw and escaped variants; rejecting on escaped presence creates false negatives.
+    return payload in response_text
 
 
 def is_xss_vulnerable(response_text: str, payload: str) -> bool:

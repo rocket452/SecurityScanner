@@ -7,10 +7,18 @@ import yaml
 import json
 import csv
 import os
+import re
 import html as html_escape
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Avoid Windows console UnicodeEncodeError crashes (cp1252, etc.).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,6 +61,7 @@ ALL_SUBDOMAINS = []
 
 # Get custom headers from bug bounty config
 CUSTOM_HEADERS = CONFIG.get('bug_bounty', {}).get('custom_headers', {})
+REQUEST_HEADERS = None
 
 # ============================================================================
 # MAIN EXECUTION
@@ -67,6 +76,11 @@ def main():
     
     # Parse arguments
     args = parse_arguments()
+
+    # HAR inventory mode: build endpoint/parameter inventory and exit (no scanning).
+    if getattr(args, 'har', None):
+        run_har_inventory(args)
+        return
     
     # Log bug bounty program info if configured
     bug_bounty_config = CONFIG.get('bug_bounty', {})
@@ -91,6 +105,15 @@ def main():
             log(f'?? Using custom XSS payloads from: {args.xss_payloads}', 'INFO')
         if args.xss_callback:
             log(f'?? Blind XSS callback URL: {args.xss_callback}', 'INFO')
+        if getattr(args, 'xss_returnpath', False):
+            log('?? ReturnPath DOM XSS workflow enabled', 'INFO')
+        if getattr(args, 'xss_dom_audit', False):
+            log('?? Static DOM XSS audit enabled', 'INFO')
+
+    # Log auth/session config (never log values).
+    if getattr(args, 'headers_file', None) or getattr(args, 'cookie', None):
+        header_names = sorted(list((REQUEST_HEADERS or {}).keys()))
+        log(f"Auth/session headers enabled: {', '.join(header_names) if header_names else '(none)'}", 'INFO')
 
     # Run with or without keep-awake based on flag
     if args.keep_awake:
@@ -100,6 +123,38 @@ def main():
             run_scan(args)
     else:
         run_scan(args)
+
+
+def run_har_inventory(args) -> None:
+    from scanners.har_inventory import build_inventory_from_har, write_inventory_outputs
+    import urllib.parse
+
+    scopes = list(getattr(args, 'har_allow_host', []) or [])
+    if getattr(args, 'target', None):
+        t = str(args.target)
+        if t.startswith(("http://", "https://")):
+            scopes.append(urllib.parse.urlparse(t).netloc)
+        else:
+            scopes.append(t)
+
+    redact = not bool(getattr(args, 'har_no_redact', False))
+    items = build_inventory_from_har(
+        har_path=args.har,
+        scopes=scopes,
+        include_headers=bool(getattr(args, 'har_include_headers', False)),
+        redact=redact,
+    )
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    text_out = getattr(args, 'har_out', None) or str(Path("reports") / f"har_inventory_{ts}.txt")
+    json_out = getattr(args, 'har_json_out', None)
+    text_path, json_path = write_inventory_outputs(items, text_out=text_out, json_out=json_out)
+
+    log(f"HAR inventory entries: {len(items)}", "OK" if items else "WARN")
+    if text_path:
+        log(f"Inventory text saved to: {text_path}", "INFO")
+    if json_path:
+        log(f"Inventory JSON saved to: {json_path}", "INFO")
 
 def run_scan(args):
     """Execute the main scan workflow."""
@@ -293,6 +348,15 @@ Examples:
         help='Enable enhanced breakout XSS detection with template literals, JSON contexts, and multi-layer encoding analysis'
     )
     xss_group.add_argument(
+        '--xss-returnpath',
+        action='store_true',
+        help='Run specialized DOM XSS check for returnPath reflected into href (PortSwigger lab workflow)'
+    )
+    xss_group.add_argument(
+        '--xss-returnpath-feedback-path',
+        help='Feedback page path for returnPath DOM XSS check (default: auto-discover or /feedback)'
+    )
+    xss_group.add_argument(
         '--no-xss',
         action='store_true',
         help='Disable all XSS scanning'
@@ -328,14 +392,19 @@ Examples:
         help='Callback URL for blind XSS detection (e.g., Burp Collaborator, webhook.site)'
     )
     xss_group.add_argument(
+        '--xss-max-payloads',
+        type=int,
+        help='Maximum payloads to try per parameter (overrides config xss.max_payloads_per_param)'
+    )
+    xss_group.add_argument(
         '--safe',
         action='store_true',
-        help='Enable safe mode for XSS scanning (bounded payloads, no bypasses)'
+        help='Enable safe mode for XSS scanning (bounded payloads, fewer bypasses)'
     )
     xss_group.add_argument(
         '--unsafe',
         action='store_true',
-        help='Disable safe mode for XSS scanning (more aggressive payloads)'
+        help='Force unsafe mode for XSS scanning (more aggressive payloads)'
     )
     xss_group.add_argument(
         '--arjun-threads',
@@ -377,6 +446,42 @@ Examples:
         action='store_true',
         help='Verify DOM XSS execution using a headless browser (Playwright/Chromium). Slower but higher confidence.'
     )
+    xss_group.add_argument(
+        '--xss-dom-audit',
+        action='store_true',
+        help='Run static DOM audit for common DOM XSS source/sink flows (e.g. location.hash -> innerHTML)'
+    )
+
+    # Traffic import options (inventory only, no scanning)
+    traffic_group = parser.add_argument_group('Traffic Import (Inventory)')
+    traffic_group.add_argument(
+        '--har',
+        help='Path to a browser-exported HAR file. When set, the tool will build an endpoint/parameter inventory and exit.'
+    )
+    traffic_group.add_argument(
+        '--har-out',
+        help='Write inventory text output to this path (default: ./reports/har_inventory_<timestamp>.txt)'
+    )
+    traffic_group.add_argument(
+        '--har-json-out',
+        help='Write inventory JSON output to this path (optional)'
+    )
+    traffic_group.add_argument(
+        '--har-allow-host',
+        action='append',
+        default=[],
+        help='Additional host/domain to treat as in-scope for HAR filtering (repeatable)'
+    )
+    traffic_group.add_argument(
+        '--har-include-headers',
+        action='store_true',
+        help='Include request header names in the inventory (values are never written)'
+    )
+    traffic_group.add_argument(
+        '--har-no-redact',
+        action='store_true',
+        help='Do not redact query parameter values in sample URLs'
+    )
     
     # Output options
     output_group = parser.add_argument_group('Output Options')
@@ -387,13 +492,24 @@ Examples:
     output_group.add_argument(
         '-f', '--format',
         choices=['json', 'html', 'markdown', 'csv'],
-        default='json',
-        help='Report format (default: json)'
+        default='html',
+        help='Report format (default: html)'
     )
     output_group.add_argument(
         '--no-file',
         action='store_true',
         help='Skip saving report to file (console only)'
+    )
+
+    # Auth/session options
+    auth_group = parser.add_argument_group('Auth/Session Options')
+    auth_group.add_argument(
+        '--headers-file',
+        help='Path to a JSON file of headers to include with every request (values may include auth tokens).'
+    )
+    auth_group.add_argument(
+        '--cookie',
+        help='Cookie header value to include with every request (example: \"session=...; csrftoken=...\").'
     )
     
     # System options
@@ -443,15 +559,32 @@ Examples:
         action='store_true',
         help='Run only XSS scanning (skip admin/backup/bucket/dir fuzzing and other scanners)'
     )
+    scanner_group.add_argument(
+        '--path-scan-depth',
+        type=int,
+        default=0,
+        help='Recursively scan discovered internal paths (from links + fuzzing) up to this depth (default: 0 = disabled)'
+    )
+    scanner_group.add_argument(
+        '--path-scan-max-urls',
+        type=int,
+        default=40,
+        help='Maximum number of URLs to scan per root target when --path-scan-depth is enabled (default: 40)'
+    )
     
     args = parser.parse_args()
     
-    # Validation: require either target or --fetch-scope
-    if not args.fetch_scope and not args.target:
-        parser.error('Either provide a target domain or use --fetch-scope with --h1-program')
+    # Validation: require either target or --fetch-scope, unless running in HAR inventory mode.
+    if not args.har and not args.fetch_scope and not args.target:
+        parser.error('Either provide a target domain/URL, use --fetch-scope with --h1-program, or use --har')
     
     if args.fetch_scope and not args.h1_program:
         parser.error('--fetch-scope requires --h1-program')
+
+    if args.har:
+        # In HAR mode, require an explicit scope: either a target or at least one allow-host.
+        if not args.target and not getattr(args, 'har_allow_host', []):
+            parser.error('--har requires either a positional target (domain/URL) or one or more --har-allow-host values')
     
     # Validate XSS exploitation mode requires callback URL
     if args.xss_mode == 'exploitation' and not args.xss_callback:
@@ -464,7 +597,8 @@ Examples:
 
     # Resolve XSS safety and Arjun defaults from config
     xss_config = CONFIG.get('xss', {})
-    safe_default = xss_config.get('safe_mode', True)
+    # Default to unsafe unless config explicitly enables safe_mode.
+    safe_default = xss_config.get('safe_mode', False)
     if args.safe:
         args.safe_mode = True
     elif args.unsafe:
@@ -480,14 +614,21 @@ Examples:
         args.xss_standard_enabled = False
         args.xss_breakout_enabled = False
         args.xss_stored_enabled = False
+        args.xss_returnpath = False
     else:
         args.xss_standard_enabled = standard_default and not args.no_xss_standard
         args.xss_breakout_enabled = breakout_default and not args.no_xss_breakout
         args.xss_stored_enabled = stored_default and not args.no_xss_stored
         if args.xss_deep:
             args.xss_breakout_enabled = True
-
-    args.xss_enabled = args.xss_standard_enabled or args.xss_breakout_enabled or args.xss_stored_enabled
+    
+    args.xss_enabled = (
+        args.xss_standard_enabled
+        or args.xss_breakout_enabled
+        or args.xss_stored_enabled
+        or getattr(args, 'xss_returnpath', False)
+        or getattr(args, 'xss_dom_audit', False)
+    )
 
     args.arjun_threads = args.arjun_threads or xss_config.get('arjun_threads', 10)
     args.arjun_timeout = args.arjun_timeout or xss_config.get('arjun_timeout', 120)
@@ -502,6 +643,33 @@ Examples:
         args.xss_crawl_enabled = crawl_default
     args.xss_crawl_max_pages = args.crawl_pages or xss_config.get('crawl_max_pages', 25)
     args.xss_crawl_max_depth = args.crawl_depth or xss_config.get('crawl_max_depth', 2)
+
+    # Build effective request headers (custom headers + user-provided auth/session headers).
+    def _load_headers_file(path: str) -> dict:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                obj = json.load(f)
+        except Exception as e:
+            parser.error(f'Failed to read --headers-file: {e}')
+        if not isinstance(obj, dict):
+            parser.error('--headers-file must be a JSON object of header-name -> value')
+        out = {}
+        for k, v in obj.items():
+            if k is None:
+                continue
+            out[str(k)] = '' if v is None else str(v)
+        return out
+
+    effective = {}
+    if CUSTOM_HEADERS:
+        effective.update(CUSTOM_HEADERS)
+    if getattr(args, 'headers_file', None):
+        effective.update(_load_headers_file(args.headers_file))
+    if getattr(args, 'cookie', None):
+        effective['Cookie'] = str(args.cookie)
+
+    global REQUEST_HEADERS
+    REQUEST_HEADERS = effective or None
     
     return args
 
@@ -598,13 +766,112 @@ def run_all_scans(subdomains, args):
     
     return scan_results
 
+def _normalize_url_for_recursion(url: str) -> str:
+    """Canonicalize URL for visited-set comparisons (drop query/fragment)."""
+    try:
+        import urllib.parse
+        p = urllib.parse.urlparse(url)
+        return urllib.parse.urlunparse((p.scheme, p.netloc, p.path or '/', '', '', ''))
+    except Exception:
+        return url
+
+def _should_recurse_url(root_url: str, candidate_url: str) -> bool:
+    """Limit recursion to same-origin, non-static, likely-interesting paths."""
+    try:
+        import urllib.parse
+        root = urllib.parse.urlparse(root_url)
+        c = urllib.parse.urlparse(candidate_url)
+    except Exception:
+        return False
+
+    if c.scheme not in ('http', 'https'):
+        return False
+    if c.netloc != root.netloc:
+        return False
+
+    path = c.path or '/'
+    if not path.startswith('/'):
+        path = '/' + path
+
+    # Skip obvious static asset files.
+    last = path.rsplit('/', 1)[-1]
+    if '.' in last:
+        ext = last.rsplit('.', 1)[-1].lower()
+        allowed_dynamic = {'php', 'asp', 'aspx', 'jsp', 'html', 'htm'}
+        if ext not in allowed_dynamic:
+            return False
+
+    # Skip very common static directories to keep recursion focused.
+    seg = path.strip('/').split('/', 1)[0].lower() if path.strip('/') else ''
+    skip_dirs = {'resources', 'static', 'assets', 'images', 'img', 'css', 'js', 'fonts', 'image', 'media'}
+    if seg in skip_dirs:
+        return False
+
+    return True
+
+def _extract_discovered_endpoints_from_vulns(vulns):
+    """Pull URLs we discovered during scanning that are worth scanning next."""
+    endpoints = []
+    for v in vulns or []:
+        ep = v.get('endpoint')
+        if not ep:
+            continue
+        endpoints.append(ep)
+    return endpoints
+
+def scan_with_path_recursion(root_url: str, args, skip_nuclei: bool = False):
+    """
+    Scan a root URL, then recursively scan discovered internal paths up to args.path_scan_depth.
+    Returns a list of (url, vulns) entries suitable for report generation.
+    """
+    from collections import deque
+    import urllib.parse
+
+    max_depth = max(0, int(getattr(args, 'path_scan_depth', 0) or 0))
+    max_urls = max(1, int(getattr(args, 'path_scan_max_urls', 40) or 40))
+
+    visited = set()
+    results = []
+    q = deque([(root_url, 0)])
+
+    while q and len(visited) < max_urls:
+        url, depth = q.popleft()
+        norm = _normalize_url_for_recursion(url)
+        if norm in visited:
+            continue
+        visited.add(norm)
+
+        vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+        results.append((url, vulns))
+
+        if depth >= max_depth:
+            continue
+
+        for child in _extract_discovered_endpoints_from_vulns(vulns):
+            # Drop query/fragment for recursion to avoid blowing up the URL space.
+            child_norm = _normalize_url_for_recursion(child)
+            if child_norm in visited:
+                continue
+            if not _should_recurse_url(root_url, child_norm):
+                continue
+            # Use the normalized URL to keep recursion stable.
+            q.append((child_norm, depth + 1))
+
+    if q and len(visited) >= max_urls:
+        log(f'Path recursion hit max URL limit ({max_urls}); {len(q)} remaining in queue not scanned', 'WARN')
+
+    return results
+
 def run_traditional_scans(live_domains, args, skip_nuclei=False):
     """Run traditional vulnerability scanners on live domains."""
     scan_results = []
     for url, is_live, status_code in live_domains:
         if is_live:
-            vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
-            scan_results.append((url, vulns))
+            if getattr(args, 'path_scan_depth', 0) and not getattr(args, 'xss_only', False):
+                scan_results.extend(scan_with_path_recursion(url, args, skip_nuclei=skip_nuclei))
+            else:
+                vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+                scan_results.append((url, vulns))
     
     return scan_results
 
@@ -648,7 +915,12 @@ def generate_zap_report(output_file, args):
 
 def log(msg, level='INFO'):
     """Centralized logging function"""
-    print(f'[{level}] {msg}', flush=True)
+    try:
+        print(f'[{level}] {msg}', flush=True)
+    except UnicodeEncodeError:
+        # Some Windows consoles default to cp1252 and cannot print emoji or other Unicode.
+        safe = f'[{level}] {msg}'.encode('ascii', errors='backslashreplace').decode('ascii', errors='ignore')
+        print(safe, flush=True)
 
 # ============================================================================
 # SUBDOMAIN ENUMERATION
@@ -821,7 +1093,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
         # Import scanners from scanners package
         from scanners.admin_scanner import check_admin
         from scanners.backup_scanner import check_backup
-        from scanners.directory_scanner import check_exposed_buckets, fuzz_directories
+        from scanners.directory_scanner import check_exposed_buckets, fuzz_directories, discover_paths_from_links
 
         def _run_xss_scans() -> None:
             # XSS scanning (standard reflected + breakout)
@@ -832,7 +1104,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             xss_timeout = xss_config.get('timeout', 10)
             xss_callback = args.xss_callback or xss_config.get('callback_url')
             xss_mode = args.xss_mode or xss_config.get('mode', 'advanced')
-            max_payloads = xss_config.get('max_payloads_per_param', 20)
+            max_payloads = getattr(args, 'xss_max_payloads', None) or xss_config.get('max_payloads_per_param', 20)
             stored_enabled = xss_config.get('stored_enabled', True)
 
             if getattr(args, 'xss_standard_enabled', False):
@@ -844,6 +1116,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     custom_payloads_file=args.xss_payloads,
                     callback_url=xss_callback,
                     timeout=xss_timeout,
+                    headers=REQUEST_HEADERS,
                     enable_param_discovery=True,
                     safe_mode=getattr(args, 'safe_mode', True),
                     arjun_threads=getattr(args, 'arjun_threads', 10),
@@ -870,13 +1143,52 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     url=url,
                     args=args,
                     timeout=xss_timeout,
-                    callback_url=xss_callback
+                    callback_url=xss_callback,
+                    headers=REQUEST_HEADERS,
                 )
                 if breakout_vulns:
                     for v in breakout_vulns:
                         v.setdefault('url', url)
                         v.setdefault('sources', []).append('XSS Scanner')
                     vulns.extend(breakout_vulns)
+
+            if getattr(args, 'xss_dom_audit', False):
+                try:
+                    from scanners.dom_xss_hash_detector import scan_dom_xss_hash
+                    log(f'?? Running static DOM audit on {url}', 'INFO')
+                    dom_vulns = scan_dom_xss_hash(
+                        base_url=url,
+                        timeout_s=xss_timeout,
+                        headers=REQUEST_HEADERS,
+                    )
+                    if dom_vulns:
+                        for v in dom_vulns:
+                            v.setdefault('url', url)
+                            v.setdefault('sources', []).append('XSS Scanner')
+                        vulns.extend(dom_vulns)
+                        log(f'Static DOM audit produced {len(dom_vulns)} potential finding(s)', 'VULN')
+                except Exception as e:
+                    log(f'Static DOM audit error: {str(e)[:120]}', 'WARN')
+
+            if getattr(args, 'xss_returnpath', False):
+                try:
+                    from scanners.dom_xss_returnpath import check_returnpath_dom_xss
+                    log(f'?? Running returnPath DOM XSS workflow on {url}', 'INFO')
+                    returnpath_vuln = check_returnpath_dom_xss(
+                        base_url=url,
+                        feedback_path=getattr(args, 'xss_returnpath_feedback_path', None),
+                        timeout_s=xss_timeout,
+                        headers=REQUEST_HEADERS,
+                        headed=False,
+                        slow_mo_ms=0,
+                    )
+                    if returnpath_vuln:
+                        returnpath_vuln.setdefault('url', url)
+                        returnpath_vuln.setdefault('sources', []).append('XSS Scanner')
+                        vulns.append(returnpath_vuln)
+                        log('DOM XSS returnPath workflow confirmed', 'VULN')
+                except Exception as e:
+                    log(f'ReturnPath DOM XSS workflow error: {str(e)[:120]}', 'WARN')
 
         # XSS-only mode: skip the long-running non-XSS scanners so runs complete quickly.
         if getattr(args, 'xss_only', False):
@@ -908,6 +1220,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     vulns.append({
                         'type': 'exposed_storage',
                         'description': f'Exposed directory listing: {full_url}',
+                        'endpoint': full_url,
                         'status_code': status,
                         'severity': 'high',
                         'url': url
@@ -917,6 +1230,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     vulns.append({
                         'type': 'accessible_path',
                         'description': f'Accessible path: {full_url}',
+                        'endpoint': full_url,
                         'status_code': status,
                         'severity': 'medium',
                         'url': url
@@ -927,6 +1241,36 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     log(f'PATH EXISTS (forbidden): {full_url} [{status}]', 'INFO')
         
         # Recursive directory fuzzing (scanner module handles its own logging)
+        # Also try quick link-based discovery so we can pick up obvious endpoints like "/feedback"
+        # even when wordlist fuzzing times out or is blocked.
+        try:
+            link_discovered = discover_paths_from_links(
+                url,
+                timeout=CONFIG.get('rate_limiting', {}).get('http_timeout', 10),
+                headers=REQUEST_HEADERS,
+            )
+        except Exception:
+            link_discovered = []
+
+        if link_discovered:
+            log(f'Discovered {len(link_discovered)} path(s) from on-page links/forms', 'OK')
+            shown = 0
+            for path, status in link_discovered:
+                if status.startswith('2') or status.startswith('3'):
+                    from urllib.parse import urljoin
+                    full_path_url = urljoin(url, path)
+                    vulns.append({
+                        'type': 'discovered_path',
+                        'description': f'Discovered path (link-based): {full_path_url}',
+                        'endpoint': full_path_url,
+                        'status_code': int(status),
+                        'severity': 'low',
+                        'url': url
+                    })
+                    shown += 1
+                    if shown <= 10:
+                        log(f'LINK: {full_path_url} [{status}]', 'VULN')
+
         discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
         
         if discovered:
@@ -942,6 +1286,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     vulns.append({
                         'type': 'discovered_path',
                         'description': f'Discovered path: {full_path_url}',
+                        'endpoint': full_path_url,
                         'status_code': int(status),
                         'severity': 'low',
                         'url': url
@@ -1022,28 +1367,38 @@ def probe_live_domains(domains):
             if domain.startswith('http://') or domain.startswith('https://'):
                 try:
                     resp = client.get(domain)
+                    # Treat any HTTP response as "live" (even 5xx) so scans can still run on flaky targets.
+                    live_domains.append((domain, True, resp.status_code))
                     if 200 <= resp.status_code < 500:
-                        live_domains.append((domain, True, resp.status_code))
                         print(f'✅ {domain} ({resp.status_code})')
                     else:
-                        live_domains.append((domain, False, resp.status_code))
+                        print(f'⚠️  {domain} ({resp.status_code})')
                 except Exception as e:
                     log(f'{domain} unreachable: {str(e)[:50]}', 'DEBUG')
                     live_domains.append((domain, False, None))
                 continue
 
+            found = False
+            last_err = None
             for proto in ['https', 'http']:
+                url = f'{proto}://{domain}'
                 try:
-                    url = f'{proto}://{domain}'
                     resp = client.get(url)
-                    
+                    live_domains.append((url, True, resp.status_code))
                     if 200 <= resp.status_code < 500:
-                        live_domains.append((url, True, resp.status_code))
                         print(f'✅ {url} ({resp.status_code})')
-                        break
-                        
+                    else:
+                        print(f'⚠️  {url} ({resp.status_code})')
+                    found = True
+                    break
                 except Exception as e:
+                    last_err = e
                     log(f'{url} unreachable: {str(e)[:50]}', 'DEBUG')
+
+            if not found:
+                if last_err is not None:
+                    log(f'{domain} unreachable: {str(last_err)[:50]}', 'DEBUG')
+                live_domains.append((domain, False, None))
     
     return live_domains
 
@@ -1099,6 +1454,10 @@ def save_report(scan_results, target, output_file=None, format='json'):
     if output_file is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_target = target.replace('://', '_').replace('/', '_').replace('.', '_')
+        # Windows-friendly: strip querystrings and replace invalid filename chars.
+        safe_target = safe_target.split('?', 1)[0]
+        safe_target = safe_target.split('#', 1)[0]
+        safe_target = re.sub(r'[^A-Za-z0-9_\\-]+', '_', safe_target)
         output_file = reports_dir / f'report_{safe_target}_{timestamp}.{format}'
     else:
         output_file = Path(output_file)
@@ -1363,6 +1722,18 @@ def save_html_report(report_data, output_file):
                     
                     # Add XSS-specific details (for all XSS types)
                     if vuln.get('type', '').lower().endswith('xss'):
+                        # Technique tags (lab-derived strategy IDs)
+                        technique_id = vuln.get('technique_id')
+                        technique_name = vuln.get('technique_name')
+                        if technique_id or technique_name:
+                            html += '            <div class="detail-section">\n'
+                            html += '                <h4>Technique</h4>\n'
+                            if technique_name:
+                                html += f'                <div class="code-block">{html_escape.escape(str(technique_name))}</div>\n'
+                            if technique_id:
+                                html += f'                <div style="margin-top: 6px; font-size: 12px; color: #666;"><strong>ID:</strong> {html_escape.escape(str(technique_id))}</div>\n'
+                            html += '            </div>\n'
+
                         # Payload
                         payload = vuln.get('payload')
                         if payload:

