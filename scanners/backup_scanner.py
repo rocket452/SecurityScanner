@@ -5,7 +5,7 @@ import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def check_backup(url):
+def check_backup(url, headers=None):
     """Hunt for backup files/downloads"""
     backup_paths = [
         '/backup.zip', '/backup.tar.gz', '/db.sql', '/database.sql',
@@ -15,7 +15,7 @@ def check_backup(url):
     try:
         for path in backup_paths:
             test_url = f'{url.rstrip("/")}{path}'
-            resp = requests.get(test_url, timeout=5, verify=False)
+            resp = requests.get(test_url, timeout=5, verify=False, headers=headers)
             if resp.status_code == 200:
                 content = resp.text.lower()
                 if any(ext in test_url.lower() for ext in ['.bak', '.old', '.zip', '.sql', '.tar', 'backup']):

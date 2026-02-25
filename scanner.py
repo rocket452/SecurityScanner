@@ -1196,19 +1196,19 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             return vulns
         
         # Admin panel detection
-        if check_admin(url):
+        if check_admin(url, headers=REQUEST_HEADERS):
             vulns.append({'type': 'admin_panel', 'description': 'Admin panel exposed', 'severity': 'medium', 'url': url})
             log(f'ADMIN on {url}', 'VULN')
         
         # Backup file detection
-        if check_backup(url):
+        if check_backup(url, headers=REQUEST_HEADERS):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
             log(f'BACKUP on {url}', 'VULN')
         
         _run_xss_scans()
 
         # Exposed buckets/storage detection (scanner module handles its own logging)
-        bucket_results = check_exposed_buckets(url)
+        bucket_results = check_exposed_buckets(url, headers=REQUEST_HEADERS)
         
         if bucket_results:
             for path, status, vuln_type in bucket_results:
@@ -1271,7 +1271,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     if shown <= 10:
                         log(f'LINK: {full_path_url} [{status}]', 'VULN')
 
-        discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3)
+        discovered = fuzz_directories(url, timeout=180, recursive=True, max_depth=3, headers=REQUEST_HEADERS)
         
         if discovered:
             log(f'Discovered {len(discovered)} total paths via recursive fuzzing', 'OK')
@@ -1314,7 +1314,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             nuclei_rate_limit = CONFIG.get('rate_limiting', {}).get('nuclei_rate_limit', 150)
             nuclei_concurrency = CONFIG.get('rate_limiting', {}).get('nuclei_concurrency', 25)
             
-            result = subprocess.run([
+            nuclei_cmd = [
                 'nuclei',
                 '-u', url,
                 '-silent',
@@ -1322,7 +1322,12 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                 '-severity', 'critical,high,medium',
                 '-rate-limit', str(nuclei_rate_limit),  # Requests per minute
                 '-c', str(nuclei_concurrency)  # Concurrent templates
-            ], capture_output=True, text=True, timeout=180)
+            ]
+            if REQUEST_HEADERS:
+                for key, value in REQUEST_HEADERS.items():
+                    nuclei_cmd.extend(['-H', f'{key}: {value}'])
+
+            result = subprocess.run(nuclei_cmd, capture_output=True, text=True, timeout=180)
             
             if result.stdout.strip():
                 for line in result.stdout.strip().split('\n'):
@@ -1359,7 +1364,7 @@ def probe_live_domains(domains):
     timeout = CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
     
     # Create client with custom headers from config
-    headers = CUSTOM_HEADERS.copy() if CUSTOM_HEADERS else {}
+    headers = (REQUEST_HEADERS or CUSTOM_HEADERS or {}).copy()
     
     with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
         for domain in sorted(domains):

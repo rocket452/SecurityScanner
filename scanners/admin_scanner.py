@@ -5,7 +5,7 @@ import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def check_admin(url):
+def check_admin(url, headers=None):
     """Check for common admin panels/backdoors"""
     admin_paths = [
         '/admin', '/administrator', '/wp-admin', '/cpanel', '/webmail',
@@ -15,7 +15,7 @@ def check_admin(url):
     # First check if root is accessible to establish baseline
     root_status = None
     try:
-        root_resp = requests.get(url, timeout=5, verify=False)
+        root_resp = requests.get(url, timeout=5, verify=False, headers=headers)
         root_status = root_resp.status_code
     except:
         pass
@@ -27,7 +27,7 @@ def check_admin(url):
     try:
         for path in admin_paths:
             test_url = f'{url.rstrip("/")}{path}'
-            resp = requests.get(test_url, timeout=5, verify=False)
+            resp = requests.get(test_url, timeout=5, verify=False, headers=headers)
             
             # Flag if admin path returns 200 with admin keywords
             if resp.status_code == 200:
