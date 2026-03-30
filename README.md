@@ -112,6 +112,7 @@ The runtime flow in `scanner.py` is:
 - Optional ZAP branch: spider/passive scan by default, active scan only when enabled.
 - Traditional branch: admin panel checks, backup file checks, XSS scans (standard, breakout, optional DOM workflows), exposed bucket/path checks, link discovery, recursive directory fuzzing, and optional Nuclei.
 - Optional recursive path expansion (`--path-scan-depth`) can rescan discovered same-origin endpoints.
+- The scanner now creates a per-target session JSON under `reports/sessions/` by default so later runs can resume without rescanning the same paths.
 
 6. Aggregate and deduplicate findings
 - Results from all scanners and all targets are merged.
@@ -123,6 +124,24 @@ The runtime flow in `scanner.py` is:
 - When ZAP is enabled, an additional ZAP HTML report can be generated alongside the main report.
 
 ## 🚀 Quick Start
+
+### Resume A Long Single-Target Scan
+
+By default, the scanner creates and reuses a per-target session file under `reports/sessions/`. It will skip URLs it already completed and continue from any pending discovered paths left in the queue.
+
+```bash
+# Session 1
+python scanner.py https://target.example \
+  --path-scan-depth 3 \
+  --path-scan-max-urls 25
+
+# Session 2+ (same command; the same default session file is reused)
+python scanner.py https://target.example \
+  --path-scan-depth 3 \
+  --path-scan-max-urls 25
+```
+
+If you want to throw away old progress and start over, add `--reset-session` once. If you want to disable session persistence for a run, use `--no-session`. If you want a non-default path, you can still pass `--session-file /custom/path.json`.
 
 ### 1. Clone and build
 

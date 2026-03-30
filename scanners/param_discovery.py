@@ -9,6 +9,8 @@ Arjun tests thousands of common parameter names to discover hidden attack surfac
 import subprocess
 import json
 import os
+import sys
+import shutil
 import tempfile
 from typing import List, Dict, Optional
 from .xss_scanner import log
@@ -39,9 +41,10 @@ def discover_parameters(url: str,
         output_file = tmp_file.name
     
     try:
-        # Build Arjun command
-        cmd = [
-            'arjun',
+        # Build Arjun command. Prefer PATH binary, otherwise use module invocation
+        # so user installs in site-packages still work without PATH updates.
+        arjun_cmd = ['arjun'] if shutil.which('arjun') else [sys.executable, '-m', 'arjun']
+        cmd = arjun_cmd + [
             '-u', url,
             '-m', method,
             '-oJ', output_file,  # JSON output

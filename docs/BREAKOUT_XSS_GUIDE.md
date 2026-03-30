@@ -57,6 +57,9 @@ var search = ''; alert(1); //';
 3. **Callback-based blind XSS** - Test with external callback URLs
 4. **Comprehensive parameter discovery** - Integrates with Arjun for hidden params
 5. **Detailed exploitation steps** - Generates curl commands and browser instructions
+6. **Allowlist bypass probing** - Detects tag/event allowlist edge cases such as:
+   - `<body onresize=...>` auto-triggered with iframe resize
+   - `<svg><animatetransform onbegin=...>` for SVG animation event allowlists
 
 ## Usage
 

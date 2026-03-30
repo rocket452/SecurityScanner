@@ -5,13 +5,15 @@ import re
 import httpx
 import yaml
 import time
+import os
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 # Load configuration
 def load_config():
+    config_path = os.getenv('SECURITYSCANNER_CONFIG', 'config.yaml')
     try:
-        with open('config.yaml', 'r') as f:
+        with open(config_path, 'r') as f:
             return yaml.safe_load(f)
     except:
         # Return defaults if config file not found
@@ -302,7 +304,14 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
             for key, value in headers.items():
                 ffuf_cmd.extend(['-H', f'{key}: {value}'])
 
-        result = subprocess.run(ffuf_cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            ffuf_cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=timeout,
+        )
         
         # Parse results
         lines = result.stdout.split('\n')
@@ -399,7 +408,14 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=T
                 for key, value in headers.items():
                     ffuf_cmd.extend(['-H', f'{key}: {value}'])
 
-            result = subprocess.run(ffuf_cmd, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(
+                ffuf_cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=timeout,
+            )
             
             lines = result.stdout.split('\n')
             current_status = None

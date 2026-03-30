@@ -9,6 +9,7 @@ This directory contains comprehensive tests for the breakout XSS detection syste
 ```bash
 # From the SecurityScanner root directory
 python3 tests/test_breakout_xss_integration.py
+python3 -m unittest tests/test_svg_allowlist_strategy.py
 ```
 
 ### What the Tests Cover

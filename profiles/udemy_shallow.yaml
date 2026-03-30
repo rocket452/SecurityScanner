@@ -1,0 +1,62 @@
+# Conservative profile for an initial, low-impact Udemy web scan.
+# Use with: SECURITYSCANNER_CONFIG=profiles/udemy_shallow.yaml
+
+bug_bounty:
+  program: "udemy"
+  hackerone_username: "nulllfungus"
+  custom_headers: {}
+  max_requests_per_second: 1
+
+rate_limiting:
+  ffuf_threads: 5
+  nuclei_rate_limit: 30
+  nuclei_concurrency: 3
+  http_timeout: 20
+  request_delay: 750
+
+zap:
+  enabled: false
+  proxy_url: http://localhost:8080
+  api_key: null
+  timeout: 180
+  spider: true
+  passive_scan: true
+  active_scan: false
+  max_spider_depth: 2
+
+xss:
+  mode: advanced
+  timeout: 20
+  callback_url: null
+  safe_mode: true
+  standard_enabled: true
+  breakout_enabled: true
+  stored_enabled: false
+  max_payloads_per_param: 6
+  arjun_threads: 2
+  arjun_timeout: 45
+  arjun_wordlist: ./wordlists/arjun_params.txt
+  fallback_params: ["q", "search", "query", "keyword", "term", "id", "page", "url", "redirect", "name"]
+  crawl_enabled: true
+  crawl_max_pages: 12
+  crawl_max_depth: 1
+
+ai_reports:
+  enabled: false
+  provider: openai
+  model: gpt-4o
+  auto_generate: false
+  output_dir: ./h1_reports
+
+api_keys:
+  shodan: ""
+  censys_id: ""
+  censys_secret: ""
+  virustotal: ""
+  securitytrails: ""
+  github: ""
+  urlscan: ""
+  passivetotal_username: ""
+  passivetotal_key: ""
+  binaryedge: ""
+  chaos: ""

