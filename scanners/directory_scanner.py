@@ -5,13 +5,15 @@ import re
 import httpx
 import yaml
 import time
+import os
 from html.parser import HTMLParser
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 # Load configuration
 def load_config():
+    config_path = os.getenv('SECURITYSCANNER_CONFIG', 'config.yaml')
     try:
-        with open('config.yaml', 'r') as f:
+        with open(config_path, 'r') as f:
             return yaml.safe_load(f)
     except:
         # Return defaults if config file not found
@@ -183,7 +185,7 @@ def discover_paths_from_links(
 
     return discovered
 
-def check_exposed_buckets(url):
+def check_exposed_buckets(url, headers=None):
     """
     Check for common exposed bucket/storage paths
     Returns list of exposed paths with status codes
@@ -218,7 +220,7 @@ def check_exposed_buckets(url):
     request_delay = CONFIG.get('rate_limiting', {}).get('request_delay', 0) / 1000.0  # Convert ms to seconds
     
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
             for pattern in bucket_patterns:
                 try:
                     # Add delay between requests if configured
@@ -268,7 +270,7 @@ def check_exposed_buckets(url):
     
     return exposed
 
-def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, max_depth=3, current_depth=0):
+def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, max_depth=3, current_depth=0, headers=None):
     """
     Recursively fuzz directories using ffuf
     Returns list of all discovered paths with status codes
@@ -287,7 +289,7 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
     
     try:
         # Run ffuf on current level with configurable thread count
-        result = subprocess.run([
+        ffuf_cmd = [
             'ffuf',
             '-u', f'{url.rstrip("/")}/FUZZ',
             '-w', wordlist,
@@ -297,7 +299,19 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
             '-timeout', '3',
             '-v',
             '-s'
-        ], capture_output=True, text=True, timeout=timeout)
+        ]
+        if headers:
+            for key, value in headers.items():
+                ffuf_cmd.extend(['-H', f'{key}: {value}'])
+
+        result = subprocess.run(
+            ffuf_cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=timeout,
+        )
         
         # Parse results
         lines = result.stdout.split('\n')
@@ -335,7 +349,8 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
                         wordlist=wordlist,
                         timeout=timeout,
                         max_depth=max_depth,
-                        current_depth=current_depth + 1
+                        current_depth=current_depth + 1,
+                        headers=headers,
                     )
                     # Add parent path to recursive results
                     for rpath, rstatus in recursive_results:
@@ -353,7 +368,7 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
         log(f'{depth_prefix}ffuf error at depth {current_depth}: {str(e)[:100]}', 'ERROR')
         return all_discovered
 
-def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=True, max_depth=3):
+def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=True, max_depth=3, headers=None):
     """
     Main entry point for directory fuzzing
     If recursive=True, performs recursive fuzzing up to max_depth
@@ -364,7 +379,7 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=T
         ffuf_threads = CONFIG.get('rate_limiting', {}).get('ffuf_threads', 20)
         log(f'Using {ffuf_threads} threads for ffuf', 'INFO')
         
-        discovered = fuzz_directories_recursive(url, wordlist, timeout, max_depth, current_depth=0)
+        discovered = fuzz_directories_recursive(url, wordlist, timeout, max_depth, current_depth=0, headers=headers)
         
         if discovered:
             log(f'Total paths discovered across all depths: {len(discovered)}', 'OK')
@@ -378,7 +393,7 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=T
         ffuf_threads = CONFIG.get('rate_limiting', {}).get('ffuf_threads', 20)
         discovered = []
         try:
-            result = subprocess.run([
+            ffuf_cmd = [
                 'ffuf',
                 '-u', f'{url.rstrip("/")}/FUZZ',
                 '-w', wordlist,
@@ -388,7 +403,19 @@ def fuzz_directories(url, wordlist='/app/wordlist.txt', timeout=120, recursive=T
                 '-timeout', '3',
                 '-v',
                 '-s'
-            ], capture_output=True, text=True, timeout=timeout)
+            ]
+            if headers:
+                for key, value in headers.items():
+                    ffuf_cmd.extend(['-H', f'{key}: {value}'])
+
+            result = subprocess.run(
+                ffuf_cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=timeout,
+            )
             
             lines = result.stdout.split('\n')
             current_status = None
