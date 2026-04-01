@@ -172,7 +172,7 @@ def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
                         response = client.get(base_url, params=flat_params)
                         
                         if payload in response.text:
-                            if is_xss_vulnerable(response.text, payload):
+                            if is_xss_vulnerable(response.text, payload, dict(response.headers)):
                                 vuln = {
                                     'type': 'reflected_xss',
                                     'method': 'GET',
@@ -234,7 +234,7 @@ def test_reflected_xss(url: str, timeout: int = 10) -> List[Dict]:
                                     response = client.get(form_url, params=form_data)
                                 
                                 if payload in response.text:
-                                    if is_xss_vulnerable(response.text, payload):
+                                    if is_xss_vulnerable(response.text, payload, dict(response.headers)):
                                         vuln = {
                                             'type': 'reflected_xss',
                                             'method': form['method'],
@@ -498,17 +498,80 @@ def _guess_reflection_context(text: str, payload: str) -> str:
     return 'unknown'
 
 
+def _is_html_encoded(response_text: str, payload: str) -> bool:
+    """Check whether critical characters in the payload are encoded in the response."""
+    import html
+    # If the raw payload is present verbatim, it is NOT fully encoded
+    if payload in response_text:
+        return False
+    # Check common encoding forms for '<' and '>' — if BOTH are encoded the payload is neutralised
+    lt_encoded = any(enc in response_text for enc in ['&lt;', '&#60;', '&#x3c;', '&#x3C;', '%3c', '%3C', '\\x3c', '\\u003c'])
+    gt_encoded = any(enc in response_text for enc in ['&gt;', '&#62;', '&#x3e;', '&#x3E;', '%3e', '%3E', '\\x3e', '\\u003e'])
+    if '<' in payload and '>' in payload and lt_encoded and gt_encoded:
+        return True
+    return False
+
+
 def _is_reflected_unescaped(response_text: str, payload: str) -> bool:
-    # If the raw payload is present anywhere, we consider it unescaped enough to analyze.
-    # Some pages reflect both raw and escaped variants; rejecting on escaped presence creates false negatives.
-    return payload in response_text
+    """Return True only if the payload is reflected AND its dangerous chars are not encoded."""
+    if payload not in response_text:
+        return False
+    # If key characters are HTML-encoded in the response, the payload is neutralised
+    if _is_html_encoded(response_text, payload):
+        return False
+    return True
 
 
-def is_xss_vulnerable(response_text: str, payload: str) -> bool:
+def _is_csp_blocking(response_headers: dict, payload: str) -> bool:
+    """Return True if a Content-Security-Policy header would likely block this payload."""
+    csp = response_headers.get('content-security-policy', '') or response_headers.get('Content-Security-Policy', '')
+    if not csp:
+        return False
+    csp_lower = csp.lower()
+    # 'unsafe-inline' absent in script-src means inline scripts/handlers are blocked
+    script_src_match = re.search(r"script-src\s+([^;]+)", csp_lower)
+    default_src_match = re.search(r"default-src\s+([^;]+)", csp_lower)
+    src_value = ''
+    if script_src_match:
+        src_value = script_src_match.group(1)
+    elif default_src_match:
+        src_value = default_src_match.group(1)
+    if src_value and 'unsafe-inline' not in src_value and "'none'" not in src_value:
+        payload_lower = payload.lower()
+        # Inline script/event handler payloads would be blocked
+        if any(t in payload_lower for t in ['<script', 'onerror=', 'onload=', 'onclick=', 'javascript:']):
+            return True
+    return False
+
+
+def _is_in_href_like_attr(text: str, payload: str) -> bool:
+    """Return True if the payload appears inside an href/src/action attribute value.
+
+    javascript: URIs are only executable in these attribute contexts — not in value="",
+    title tags, text nodes, meta content, etc.
+    """
+    idx = text.find(payload)
+    if idx == -1:
+        return False
+    # Look at up to 200 chars before the payload for the attribute name
+    prefix = text[max(0, idx - 200):idx]
+    return bool(re.search(
+        r'(?:href|src|action|formaction|xlink:href|data)\s*=\s*["\']?\s*$',
+        prefix, re.IGNORECASE
+    ))
+
+
+def is_xss_vulnerable(response_text: str, payload: str, response_headers: dict = None) -> bool:
     """
     Conservative vulnerability detection to reduce false positives.
+    Checks that: payload is reflected unencoded, context is exploitable,
+    and CSP (if present) would not block execution.
     """
     if not _is_reflected_unescaped(response_text, payload):
+        return False
+
+    # CSP check — skip reporting if execution would be blocked
+    if response_headers and _is_csp_blocking(response_headers, payload):
         return False
 
     actual_context = _guess_reflection_context(response_text, payload)
@@ -516,11 +579,19 @@ def is_xss_vulnerable(response_text: str, payload: str) -> bool:
         return False
 
     payload_lower = payload.lower()
-    if any(keyword in payload_lower for keyword in ['<script', '</script', 'onerror', 'onload', 'onmouseover', 'onclick', 'javascript:']):
+
+    # javascript: URI — only dangerous in href/src/action attributes, NOT in value="",
+    # <title>, text nodes, or meta attributes. Check specifically before the generic path.
+    if 'javascript:' in payload_lower and not any(
+        k in payload_lower for k in ['<script', '</script', 'onerror', 'onload', 'onmouseover', 'onclick', '<img', '<svg', '<iframe']
+    ):
+        return actual_context == 'javascript' or _is_in_href_like_attr(response_text, payload)
+
+    if any(keyword in payload_lower for keyword in ['<script', '</script', 'onerror', 'onload', 'onmouseover', 'onclick']):
         return True
     if actual_context == 'javascript' and any(token in payload_lower for token in ['alert(', 'confirm(', 'prompt(', 'fetch(', 'document.']):
         return True
-    if actual_context == 'attribute' and any(token in payload_lower for token in ['onerror', 'onload', 'onmouseover', 'onclick', 'javascript:']):
+    if actual_context == 'attribute' and any(token in payload_lower for token in ['onerror', 'onload', 'onmouseover', 'onclick']):
         return True
     if actual_context == 'html' and any(tag in payload_lower for tag in ['<img', '<svg', '<iframe', '<script', '</script']):
         return True

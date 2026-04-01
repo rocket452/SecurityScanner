@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import subprocess
 import urllib.parse
 import re
@@ -155,6 +156,21 @@ def discover_paths_from_links(
             resp = client.get(url)
             html = resp.text if resp.status_code < 500 else ''
 
+            # SPA detection: if a junk URL returns 200 with similar content, all paths are noise
+            root_body = resp.text or ''
+            root_hash = hashlib.md5(root_body.encode()).hexdigest()
+            is_spa = False
+            try:
+                junk_resp = client.get(f'{url.rstrip("/")}/definitely-not-real-xzqy9173')
+                if junk_resp.status_code == 200:
+                    junk_hash = hashlib.md5((junk_resp.text or '').encode()).hexdigest()
+                    if junk_hash == root_hash or abs(len(junk_resp.text or '') - len(root_body)) < 200:
+                        is_spa = True
+                        log('Link-based discovery: SPA detected — skipping path probing (all paths return 200)', 'INFO')
+                        return discovered
+            except Exception:
+                pass
+
             candidates = _extract_internal_paths_from_html(url, html)
             if not candidates:
                 log('Link-based discovery: extracted 0 internal paths', 'INFO')
@@ -162,6 +178,14 @@ def discover_paths_from_links(
 
             probe = candidates[:max_probe]
             log(f'Link-based discovery: extracted {len(candidates)} internal paths, probing {len(probe)}', 'INFO')
+
+            # Extensions that suggest security-interesting files even when served as HTML
+            _interesting_exts = {
+                'php', 'asp', 'aspx', 'cgi', 'pl', 'rb', 'py',
+                'json', 'xml', 'yaml', 'yml', 'txt', 'env', 'cfg',
+                'config', 'conf', 'ini', 'bak', 'sql', 'log',
+            }
+            _api_patterns = ('/api/', '/v1/', '/v2/', '/v3/', '/graphql', '/rest/', '/rpc/', '/ws/')
 
             for path in probe:
                 try:
@@ -171,6 +195,21 @@ def discover_paths_from_links(
                     test_url = urllib.parse.urljoin(url.rstrip('/') + '/', path.lstrip('/'))
                     r = client.get(test_url)
                     if r.status_code != 404:
+                        # Skip if content is identical to root (SPA catch-all returning index page)
+                        if root_hash:
+                            path_hash = hashlib.md5((r.text or '').encode()).hexdigest()
+                            if path_hash == root_hash:
+                                continue
+                        # Skip plain HTML pages with no security-interesting extension or API pattern.
+                        # These are almost always rendered pages (SPA routes, CMS pages) rather
+                        # than exposed resources. Real findings have non-HTML content or known
+                        # interesting extensions (.php, .json, .env, etc.).
+                        resp_ct = r.headers.get('content-type', '').lower()
+                        if 'text/html' in resp_ct:
+                            last_seg = path.rsplit('/', 1)[-1]
+                            ext = last_seg.rsplit('.', 1)[-1].lower() if '.' in last_seg else ''
+                            if ext not in _interesting_exts and not any(p in path.lower() for p in _api_patterns):
+                                continue
                         discovered.append((path, str(r.status_code)))
                 except httpx.HTTPError:
                     continue
@@ -215,53 +254,83 @@ def check_exposed_buckets(url, headers=None):
     ]
     
     log(f'Checking for exposed buckets/storage on {url}', 'INFO')
-    
-    timeout = CONFIG.get('rate_limiting', {}).get('http_timeout', 10)
-    request_delay = CONFIG.get('rate_limiting', {}).get('request_delay', 0) / 1000.0  # Convert ms to seconds
-    
+
+    rl = CONFIG.get('rate_limiting', {})
+    timeout = rl.get('bucket_timeout') or rl.get('http_timeout', 10)
+
+    indicators = [
+        'index of',
+        '<title>directory listing',
+        'parent directory',
+        '<pre>',
+        'listbucketresult',
+        '<?xml version',
+        'last modified',
+        '<table>',
+    ]
+
+    # SPA detection: probe root and a junk URL to see if all 200s are catch-all
+    root_hash = None
+    is_spa = False
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
-            for pattern in bucket_patterns:
-                try:
-                    # Add delay between requests if configured
-                    if request_delay > 0:
-                        time.sleep(request_delay)
-                    
-                    test_url = f'{url.rstrip("/")}{pattern}'
-                    resp = client.get(test_url)
-                    
-                    # Check if we got a directory listing or accessible bucket
-                    if resp.status_code in [200, 201, 202, 203]:
-                        content = resp.text.lower()
-                        
-                        # Indicators of directory listing or bucket exposure
-                        indicators = [
-                            'index of',
-                            '<title>directory listing',
-                            'parent directory',
-                            '<pre>',  # Common in Apache/nginx listings
-                            'listbucketresult',  # S3 bucket listing
-                            '<?xml version',  # S3 XML response
-                            'last modified',  # Directory listing
-                            '<table>',  # Often used in listings
-                        ]
-                        
-                        if any(indicator in content for indicator in indicators):
-                            exposed.append((pattern, resp.status_code, 'DIRECTORY_LISTING'))
-                            log(f'🚨 EXPOSED BUCKET: {test_url} [{resp.status_code}]', 'VULN')
-                        elif len(content) > 0:  # Accessible but not obvious listing
-                            exposed.append((pattern, resp.status_code, 'ACCESSIBLE'))
-                            log(f'⚠️  Accessible path: {test_url} [{resp.status_code}]', 'WARN')
-                    
-                    elif resp.status_code == 403:
-                        # 403 means the path exists but is forbidden - still worth noting
-                        log(f'🔒 Forbidden (exists): {test_url} [403]', 'INFO')
-                        exposed.append((pattern, 403, 'FORBIDDEN_BUT_EXISTS'))
-                        
-                except httpx.HTTPError as e:
-                    log(f'Error checking {pattern}: {str(e)[:50]}', 'DEBUG')
-                    continue
-                    
+        with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as _spa_client:
+            root_resp = _spa_client.get(url)
+            root_body = root_resp.text or ''
+            root_hash = hashlib.md5(root_body.encode()).hexdigest()
+            junk_resp = _spa_client.get(f'{url.rstrip("/")}/definitely-not-real-xzqy9173.zip')
+            if junk_resp.status_code == 200:
+                junk_hash = hashlib.md5((junk_resp.text or '').encode()).hexdigest()
+                if junk_hash == root_hash or abs(len(junk_resp.text or '') - len(root_body)) < 200:
+                    is_spa = True
+                    log(f'SPA detected on {url} — suppressing generic ACCESSIBLE findings', 'INFO')
+    except Exception:
+        pass
+
+    def _probe(pattern):
+        test_url = f'{url.rstrip("/")}{pattern}'
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
+                resp = client.get(test_url)
+            if resp.status_code in [200, 201, 202, 203]:
+                # On SPAs, every URL returns 200 — skip generic ACCESSIBLE findings
+                if is_spa:
+                    return None
+                # Skip if content is identical to root (SPA catch-all)
+                if root_hash:
+                    path_hash = hashlib.md5((resp.text or '').encode()).hexdigest()
+                    if path_hash == root_hash:
+                        return None
+                resp_ct = resp.headers.get('content-type', '').lower()
+                content = resp.text.lower()
+                if any(ind in content for ind in indicators):
+                    log(f'EXPOSED BUCKET: {test_url} [{resp.status_code}]', 'VULN')
+                    return (pattern, resp.status_code, 'DIRECTORY_LISTING')
+                # Real exposed storage/directories return security-interesting content types.
+                # HTML, images, fonts, CSS, and JS are normal web assets — not findings.
+                _uninteresting_ct = (
+                    'text/html', 'image/', 'font/', 'text/css',
+                    'application/javascript', 'text/javascript',
+                )
+                if not resp_ct or any(resp_ct.startswith(u) for u in _uninteresting_ct):
+                    return None
+                if content:
+                    log(f'Accessible path: {test_url} [{resp.status_code}]', 'WARN')
+                    return (pattern, resp.status_code, 'ACCESSIBLE')
+            elif resp.status_code == 403:
+                log(f'Forbidden (exists): {test_url} [403]', 'INFO')
+                return (pattern, 403, 'FORBIDDEN_BUT_EXISTS')
+        except httpx.HTTPError as e:
+            log(f'Error checking {pattern}: {str(e)[:50]}', 'DEBUG')
+        return None
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=min(8, len(bucket_patterns))) as executor:
+            futures = {executor.submit(_probe, p): p for p in bucket_patterns}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    exposed.append(result)
     except Exception as e:
         log(f'Bucket check error: {str(e)[:100]}', 'ERROR')
     
@@ -338,13 +407,17 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
                 (path, full_path) for path, status, full_path in discovered_this_level
                 if status in ['200', '301', '302', '403']  # Likely directories
             ]
-            
+
             if directories_to_recurse:
                 log(f'{depth_prefix}Found {len(directories_to_recurse)} potential directories to recurse into', 'INFO')
-                
-                for path, full_path in directories_to_recurse[:10]:  # Limit recursion to first 10 paths
+                dirs_limited = directories_to_recurse[:10]
+
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def _recurse(item):
+                    path, full_path = item
                     log(f'{depth_prefix}Recursing into: {path}', 'INFO')
-                    recursive_results = fuzz_directories_recursive(
+                    return path, fuzz_directories_recursive(
                         full_path,
                         wordlist=wordlist,
                         timeout=timeout,
@@ -352,9 +425,16 @@ def fuzz_directories_recursive(url, wordlist='/app/wordlist.txt', timeout=120, m
                         current_depth=current_depth + 1,
                         headers=headers,
                     )
-                    # Add parent path to recursive results
-                    for rpath, rstatus in recursive_results:
-                        all_discovered.append((f'{path}/{rpath}', rstatus))
+
+                with ThreadPoolExecutor(max_workers=min(4, len(dirs_limited))) as executor:
+                    futures = {executor.submit(_recurse, item): item for item in dirs_limited}
+                    for future in as_completed(futures):
+                        try:
+                            path, recursive_results = future.result()
+                            for rpath, rstatus in recursive_results:
+                                all_discovered.append((f'{path}/{rpath}', rstatus))
+                        except Exception as e:
+                            log(f'{depth_prefix}Recursion error: {str(e)[:80]}', 'WARN')
         
         return all_discovered
         

@@ -484,15 +484,29 @@ def run_scan(args):
     all_scan_results = []
     report_target = args.h1_program if args.fetch_scope else targets[0]
     
+    # Build scope allowlist when using --fetch-scope so discovered subdomains
+    # are restricted to explicitly listed assets only.
+    scope_allowlist = set(targets) if args.fetch_scope else None
+
     try:
         # Process each target
         for target in targets:
             # Print header
             print_header(target)
             session_state = load_scan_session_state(target, args)
-            
+
             # Step 1: Discover all subdomains
             subdomains = discover_all_subdomains(target)
+
+            # When scope was fetched from HackerOne, drop any subdomain that
+            # isn't in the explicit scope list.  Subfinder may discover internal
+            # or out-of-scope subdomains; we must not scan them.
+            if scope_allowlist is not None:
+                before = len(subdomains)
+                subdomains = [s for s in subdomains if s in scope_allowlist]
+                dropped = before - len(subdomains)
+                if dropped:
+                    log(f'Dropped {dropped} out-of-scope subdomain(s) discovered by subfinder', 'INFO')
             
             # Step 2: Run all vulnerability scans
             scan_results = []
@@ -782,6 +796,14 @@ Examples:
         help='Maximum crawl depth for parameter discovery'
     )
     xss_group.add_argument(
+        '--crawl-seeds',
+        type=str,
+        metavar='URLS',
+        help='Comma-separated seed URLs to inject into the crawler as additional entry points. '
+             'Useful for parameterised pages (e.g. search/booking flows) that the root page does not link to. '
+             'Example: --crawl-seeds "https://www.priceline.com/hotel/search?q=nyc,https://www.priceline.com/flights/"'
+    )
+    xss_group.add_argument(
         '--browser-verify',
         action='store_true',
         help='Verify DOM XSS execution using a headless browser (Playwright/Chromium). Slower but higher confidence.'
@@ -1009,6 +1031,11 @@ Examples:
         args.xss_crawl_enabled = crawl_default
     args.xss_crawl_max_pages = args.crawl_pages or xss_config.get('crawl_max_pages', 25)
     args.xss_crawl_max_depth = args.crawl_depth or xss_config.get('crawl_max_depth', 2)
+    # Parse --crawl-seeds into a list; filter empty strings
+    if getattr(args, 'crawl_seeds', None):
+        args.xss_crawl_seeds = [u.strip() for u in args.crawl_seeds.split(',') if u.strip()]
+    else:
+        args.xss_crawl_seeds = []
 
     # Build effective request headers (custom headers + user-provided auth/session headers).
     def _load_headers_file(path: str) -> dict:
@@ -1369,42 +1396,52 @@ def scan_with_path_recursion(root_url: str, args, skip_nuclei: bool = False, ses
     return results
 
 def run_traditional_scans(live_domains, args, skip_nuclei=False, session_state=None):
-    """Run traditional vulnerability scanners on live domains."""
+    """Run traditional vulnerability scanners on live domains (parallel across domains)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    live_urls = [(url, sc) for url, is_live, sc in live_domains if is_live]
     scan_results = []
-    for url, is_live, status_code in live_domains:
-        if is_live:
-            try:
-                if getattr(args, 'path_scan_depth', 0) and not getattr(args, 'xss_only', False):
-                    scan_results.extend(
-                        scan_with_path_recursion(
-                            url,
-                            args,
-                            skip_nuclei=skip_nuclei,
-                            session_state=session_state,
-                        )
-                    )
-                else:
-                    if session_state and session_state.is_completed(url):
-                        log(f'Skipping already completed URL from session state: {url}', 'INFO')
-                        cached = session_state.get_recorded_result(url)
-                        if cached:
-                            scan_results.append(cached)
-                        else:
-                            scan_results.append((url, []))
-                        continue
-                    vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
-                    scan_results.append((url, vulns))
-                    if session_state:
-                        session_state.record_result(url, vulns)
-                        session_state.mark_completed(url)
-                        session_state.save()
-            except ScanInterrupted as e:
-                scan_results.extend(e.partial_results)
-                raise ScanInterrupted(scan_results)
-            except KeyboardInterrupt:
-                log(f'Interrupt received while scanning {url}; preserving partial target results', 'WARN')
-                raise ScanInterrupted(scan_results)
-    
+    results_lock = threading.Lock()
+
+    # Use up to 6 parallel workers; single-threaded if only one URL
+    workers = min(6, len(live_urls)) if live_urls else 1
+
+    def _scan_url(url, status_code):
+        if getattr(args, 'path_scan_depth', 0) and not getattr(args, 'xss_only', False):
+            return list(scan_with_path_recursion(url, args, skip_nuclei=skip_nuclei, session_state=session_state))
+        if session_state and session_state.is_completed(url):
+            log(f'Skipping already completed URL from session state: {url}', 'INFO')
+            cached = session_state.get_recorded_result(url)
+            return [cached if cached else (url, [])]
+        vulns = scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=skip_nuclei)
+        if session_state:
+            with results_lock:
+                session_state.record_result(url, vulns)
+                session_state.mark_completed(url)
+                session_state.save()
+        return [(url, vulns)]
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_scan_url, url, sc): url for url, sc in live_urls}
+            for future in as_completed(futures):
+                url = futures[future]
+                try:
+                    with results_lock:
+                        scan_results.extend(future.result())
+                except ScanInterrupted as e:
+                    with results_lock:
+                        scan_results.extend(e.partial_results)
+                    raise ScanInterrupted(scan_results)
+                except KeyboardInterrupt:
+                    log(f'Interrupt received while scanning {url}; preserving partial target results', 'WARN')
+                    raise ScanInterrupted(scan_results)
+                except Exception as exc:
+                    log(f'Error scanning {url}: {exc}', 'ERROR')
+    except ScanInterrupted:
+        raise
+
     return scan_results
 
 # ============================================================================
@@ -1711,16 +1748,25 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                     fallback_params=getattr(args, 'xss_fallback_params', None),
                     max_payloads_per_param=max_payloads,
                     enable_stored_workflow=getattr(args, 'xss_stored_enabled', stored_enabled),
-                    browser_verify=getattr(args, 'browser_verify', False)
+                    browser_verify=getattr(args, 'browser_verify', False),
+                    seed_urls=getattr(args, 'xss_crawl_seeds', []),
                 )
                 if standard_vulns:
                     for v in standard_vulns:
                         v.setdefault('url', url)
                         v.setdefault('sources', []).append('XSS Scanner')
+                    # Filter unverified DOM XSS pattern matches: findings where
+                    # 'verified' key is explicitly False are pattern-matched only
+                    # (e.g. JSON/eval heuristic) — log them but don't add to report.
+                    reportable = [v for v in standard_vulns if v.get('verified') is not False]
+                    suppressed = [v for v in standard_vulns if v.get('verified') is False]
+                    for v in reportable:
                         severity = v.get('severity', 'medium').upper()
                         desc = v.get('description', 'XSS vulnerability')
                         log(f'XSS [{severity}] on {url}: {desc}', 'VULN')
-                    vulns.extend(standard_vulns)
+                    if suppressed:
+                        log(f'XSS: {len(suppressed)} unverified DOM pattern match(es) on {url} — not added to report', 'INFO')
+                    vulns.extend(reportable)
 
             if getattr(args, 'xss_breakout_enabled', False):
                 from scanners.xss_breakout_scanner_patch import scan_for_breakout_xss
@@ -1751,8 +1797,16 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
                         for v in dom_vulns:
                             v.setdefault('url', url)
                             v.setdefault('sources', []).append('XSS Scanner')
-                        vulns.extend(dom_vulns)
-                        log(f'Static DOM audit produced {len(dom_vulns)} potential finding(s)', 'VULN')
+                        # Only add browser-verified DOM findings to vulns list.
+                        # Unverified static pattern matches are noisy and unreliable —
+                        # log them at INFO so they're visible but don't pollute the report.
+                        verified = [v for v in dom_vulns if v.get('verified')]
+                        unverified = [v for v in dom_vulns if not v.get('verified')]
+                        vulns.extend(verified)
+                        if verified:
+                            log(f'Static DOM audit: {len(verified)} browser-verified finding(s)', 'VULN')
+                        if unverified:
+                            log(f'Static DOM audit: {len(unverified)} unverified pattern match(es) — not added to report', 'INFO')
                 except Exception as e:
                     log(f'Static DOM audit error: {str(e)[:120]}', 'WARN')
 
@@ -1781,22 +1835,43 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
             _run_xss_scans()
             return vulns
 
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+        import threading as _threading
+
         path_probe_workers = CONFIG.get('rate_limiting', {}).get('path_probe_concurrency', 8)
+        _vulns_lock = _threading.Lock()
 
-        # Admin panel detection
-        if check_admin(url, headers=REQUEST_HEADERS, max_workers=path_probe_workers):
-            vulns.append({'type': 'admin_panel', 'description': 'Admin panel exposed', 'severity': 'medium', 'url': url})
-            log(f'ADMIN on {url}', 'VULN')
-        
-        # Backup file detection
-        if check_backup(url, headers=REQUEST_HEADERS, max_workers=path_probe_workers):
-            vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
-            log(f'BACKUP on {url}', 'VULN')
-        
-        _run_xss_scans()
+        def _run_admin():
+            if check_admin(url, headers=REQUEST_HEADERS, max_workers=path_probe_workers):
+                with _vulns_lock:
+                    vulns.append({'type': 'admin_panel', 'description': 'Admin panel exposed', 'severity': 'medium', 'url': url})
+                log(f'ADMIN on {url}', 'VULN')
 
-        # Exposed buckets/storage detection (scanner module handles its own logging)
-        bucket_results = check_exposed_buckets(url, headers=REQUEST_HEADERS)
+        def _run_backup():
+            if check_backup(url, headers=REQUEST_HEADERS, max_workers=path_probe_workers):
+                with _vulns_lock:
+                    vulns.append({'type': 'backup_file', 'description': 'Backup file found', 'severity': 'high', 'url': url})
+                log(f'BACKUP on {url}', 'VULN')
+
+        def _run_xss_thread():
+            _run_xss_scans()
+
+        def _run_buckets():
+            return check_exposed_buckets(url, headers=REQUEST_HEADERS)
+
+        # Run admin, backup, XSS, and bucket checks in parallel
+        with _TPE(max_workers=4) as _pool:
+            _f_admin = _pool.submit(_run_admin)
+            _f_backup = _pool.submit(_run_backup)
+            _f_xss = _pool.submit(_run_xss_thread)
+            _f_buckets = _pool.submit(_run_buckets)
+            for _f in _ac([_f_admin, _f_backup, _f_xss, _f_buckets]):
+                try:
+                    _f.result()
+                except Exception as _e:
+                    log(f'Scanner task error on {url}: {str(_e)[:120]}', 'WARN')
+
+        bucket_results = _f_buckets.result() if not _f_buckets.exception() else []
         
         if bucket_results:
             for path, status, vuln_type in bucket_results:
@@ -1840,13 +1915,48 @@ def scan_single_domain_for_vulnerabilities(url, args, skip_nuclei=False):
         except Exception:
             link_discovered = []
 
+        # Common public paths that exist on virtually every website — not findings
+        _BORING_PATHS = {
+            '/', '/login', '/signin', '/sign-in', '/logout', '/signout', '/sign-out',
+            '/register', '/signup', '/sign-up', '/forgot-password', '/reset-password',
+            '/terms', '/terms-of-service', '/terms-of-use', '/tos',
+            '/privacy', '/privacy-policy', '/cookie-policy', '/legal',
+            '/contact', '/contact-us', '/support', '/help', '/faq', '/faqs',
+            '/about', '/about-us', '/careers', '/jobs',
+            '/sitemap', '/sitemap.xml', '/robots.txt',
+            '/home', '/index', '/index.html', '/index.php',
+            '/404', '/500', '/error',
+            '/search', '/blog', '/news',
+            # RSS / Atom feeds — public by design
+            '/feed', '/feed/', '/rss', '/rss/', '/rss.xml', '/atom', '/atom.xml',
+            '/feed/rss', '/feed/rss/', '/feed/atom', '/feed/atom/',
+            '/comments/feed', '/comments/feed/', '/comments/rss', '/comments/rss/',
+            # OpenSearch / browser integration files
+            '/osd.xml', '/opensearch.xml', '/opensearch',
+            # Blank/minimal CSS/JS stubs that WordPress and similar platforms serve
+            '/blank.css', '/blank.js',
+            # Standard web discovery files
+            '/wp-login.php', '/wp-json', '/xmlrpc.php',
+            '/manifest.json', '/manifest.webmanifest',
+            '/browserconfig.xml', '/crossdomain.xml',
+            '/humans.txt', '/security.txt', '/.well-known/security.txt',
+        }
+
         if link_discovered:
             log(f'Discovered {len(link_discovered)} path(s) from on-page links/forms', 'OK')
             shown = 0
             for path, status in link_discovered:
                 if status.startswith('2') or status.startswith('3'):
-                    from urllib.parse import urljoin
+                    from urllib.parse import urljoin, urlparse
                     full_path_url = urljoin(url, path)
+                    # Skip paths that are standard public pages — not interesting findings
+                    norm_path = urlparse(full_path_url).path.rstrip('/') or '/'
+                    if norm_path in _BORING_PATHS:
+                        continue
+                    # Also skip paths ending in common boring suffixes
+                    if any(norm_path.endswith(s) for s in ('.mobile', '/mobile')):
+                        if norm_path.rsplit('.mobile', 1)[0].rstrip('/') in _BORING_PATHS:
+                            continue
                     vulns.append({
                         'type': 'discovered_path',
                         'description': f'Discovered path (link-based): {full_path_url}',
@@ -1984,14 +2094,34 @@ def probe_live_domains(domains):
                     return domain, False, None, errors
 
             last_err = None
+            last_403_url = None
             for proto in ('https', 'http'):
                 url = f'{proto}://{domain}'
                 try:
                     resp = client.get(url)
+                    if resp.status_code == 403:
+                        last_403_url = url
+                        # Don't return yet — try www. fallback below
+                        continue
                     return url, True, resp.status_code, errors
                 except Exception as e:
                     last_err = e
                     errors.append(f'{url} unreachable: {str(e)[:50]}')
+
+            # If bare domain returned 403 on all protocols, try www. prefix.
+            # Many sites redirect bare domain to www but return 403 for direct hits.
+            if last_403_url and not domain.startswith('www.'):
+                www_url = f'https://www.{domain}'
+                try:
+                    resp = client.get(www_url)
+                    if resp.status_code != 403:
+                        log(f'www. fallback succeeded for {domain}: {www_url} ({resp.status_code})', 'INFO')
+                        return www_url, True, resp.status_code, errors
+                except Exception:
+                    pass
+                # www. also failed or 403'd — return the original 403 so the
+                # domain still gets scanned (some scanners handle 403 targets)
+                return last_403_url, True, 403, errors
 
             if last_err is not None:
                 errors.append(f'{domain} unreachable: {str(last_err)[:50]}')
@@ -2082,6 +2212,7 @@ def save_report(scan_results, target, output_file=None, format='json'):
         report_data = {
             'target': target,
             'scan_date': datetime.now().isoformat(),
+            'scan_command': ' '.join(sys.argv),
             'total_targets': len(scan_results),
             'total_vulnerabilities': sum(len(vulns) for _, vulns in scan_results),
             'results': []
@@ -2266,6 +2397,7 @@ def save_html_report(report_data, output_file):
         <h1>🔒 Security Scan Report</h1>
         <p><strong>Target:</strong> {html_escape.escape(report_data['target'])}</p>
         <p><strong>Scan Date:</strong> {report_data['scan_date']}</p>
+        <p><strong>Command:</strong> <code style="background:rgba(255,255,255,0.15);padding:2px 6px;border-radius:3px;font-size:13px;">{html_escape.escape(report_data.get('scan_command', ''))}</code></p>
     </div>
     
     <div class="summary">
@@ -2436,9 +2568,10 @@ def save_markdown_report(report_data, output_file):
     """Save report in Markdown format."""
     md = f'''# Security Scan Report
 
-**Target:** {report_data['target']}  
-**Scan Date:** {report_data['scan_date']}  
-**Total Targets:** {report_data['total_targets']}  
+**Target:** {report_data['target']}
+**Scan Date:** {report_data['scan_date']}
+**Command:** `{report_data.get('scan_command', '')}`
+**Total Targets:** {report_data['total_targets']}
 **Total Vulnerabilities:** {report_data['total_vulnerabilities']}
 
 ---
@@ -2470,6 +2603,9 @@ def save_csv_report(report_data, output_file):
     """Save report in CSV format."""
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
+        writer.writerow(['# Scan Command', report_data.get('scan_command', '')])
+        writer.writerow(['# Scan Date', report_data.get('scan_date', '')])
+        writer.writerow([])
         writer.writerow(['Target', 'URL', 'Vulnerability Type', 'Description', 'Severity', 'Status Code', 'Sources'])
         
         for result in report_data['results']:

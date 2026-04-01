@@ -504,18 +504,19 @@ def detect_breakout_xss(url: str,
     
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True, verify=False, headers=headers) as client:
-            
+            from scanners.http_utils import request_with_backoff
+
             # Step 1: Test with marker to identify context
             if method == 'GET':
                 parsed = urllib.parse.urlparse(url)
                 params = urllib.parse.parse_qs(parsed.query)
                 params[param_name] = [marker]
                 flat_params = {k: v[0] if isinstance(v, list) else v for k, v in params.items()}
-                response = client.get(f"{parsed.scheme}://{parsed.netloc}{parsed.path}", params=flat_params)
+                response = request_with_backoff(client, 'GET', f"{parsed.scheme}://{parsed.netloc}{parsed.path}", params=flat_params)
             else:  # POST
                 test_data = form_data.copy() if form_data else {}
                 test_data[param_name] = marker
-                response = client.post(url, data=test_data)
+                response = request_with_backoff(client, 'POST', url, data=test_data)
             
             # Analyze the context
             context = BreakoutContextAnalyzer.find_reflection_context(
@@ -536,10 +537,10 @@ def detect_breakout_xss(url: str,
                 if method == 'GET':
                     params[param_name] = [simple_payload]
                     flat_params = {k: v[0] if isinstance(v, list) else v for k, v in params.items()}
-                    test_response = client.get(f"{parsed.scheme}://{parsed.netloc}{parsed.path}", params=flat_params)
+                    test_response = request_with_backoff(client, 'GET', f"{parsed.scheme}://{parsed.netloc}{parsed.path}", params=flat_params)
                 else:
                     test_data[param_name] = simple_payload
-                    test_response = client.post(url, data=test_data)
+                    test_response = request_with_backoff(client, 'POST', url, data=test_data)
                 
                 # Check if payload executed (not encoded)
                 if simple_payload in test_response.text and not is_html_encoded(test_response.text, simple_payload):
@@ -581,10 +582,10 @@ def detect_breakout_xss(url: str,
                 if method == 'GET':
                     params[param_name] = [payload]
                     flat_params = {k: v[0] if isinstance(v, list) else v for k, v in params.items()}
-                    test_response = client.get(f"{parsed.scheme}://{parsed.netloc}{parsed.path}", params=flat_params)
+                    test_response = request_with_backoff(client, 'GET', f"{parsed.scheme}://{parsed.netloc}{parsed.path}", params=flat_params)
                 else:
                     test_data[param_name] = payload
-                    test_response = client.post(url, data=test_data)
+                    test_response = request_with_backoff(client, 'POST', url, data=test_data)
                 
                 # Check if breakout payload worked
                 if is_breakout_successful(test_response.text, payload, context.context_type):
@@ -631,54 +632,87 @@ def detect_breakout_xss(url: str,
 
 
 def is_html_encoded(html: str, payload: str) -> bool:
-    """Check if payload is HTML encoded in the response"""
-    encoded_patterns = [
-        payload.replace('<', '&lt;').replace('>', '&gt;'),
-        payload.replace('<', '&#60;').replace('>', '&#62;'),
-        payload.replace('<', '&#x3C;').replace('>', '&#x3E;'),
-    ]
-    
-    return any(encoded in html for encoded in encoded_patterns)
+    """
+    Check if the dangerous characters in the payload are encoded in the response.
+    Returns True only when the payload is actually neutralised (chars are encoded).
+    """
+    # If raw payload appears verbatim, it is NOT encoded
+    if payload in html:
+        return False
+
+    # Check whether '<' and '>' are both encoded when present in payload
+    lt_forms = ['&lt;', '&#60;', '&#x3c;', '&#x3C;', '%3c', '%3C', '\\x3c', '\\u003c']
+    gt_forms = ['&gt;', '&#62;', '&#x3e;', '&#x3E;', '%3e', '%3E', '\\x3e', '\\u003e']
+    html_lower = html.lower()
+
+    if '<' in payload and '>' in payload:
+        lt_encoded = any(enc in html_lower for enc in lt_forms)
+        gt_encoded = any(enc in html_lower for enc in gt_forms)
+        return lt_encoded and gt_encoded
+
+    # Check quote encoding for JS string contexts
+    if "'" in payload:
+        if '&#39;' in html or '\\u0027' in html or "\\'," in html:
+            return True
+    if '"' in payload:
+        if '&quot;' in html or '\\u0022' in html or '\\"' in html:
+            return True
+
+    return False
 
 
 def is_breakout_successful(html: str, payload: str, context_type: str) -> bool:
     """
-    Determine if a breakout payload successfully escaped the context
+    Determine if a breakout payload successfully escaped the context.
+    Requires that the payload is reflected verbatim (not encoded) AND
+    that the breakout markers are actually present in the unencoded form.
     """
-    # Check if payload is present and not encoded
+    # Payload must be present verbatim and not encoded
     if payload not in html or is_html_encoded(html, payload):
         return False
 
-    # If payload closes a script tag and is reflected unencoded, treat as breakout success
-    if '</script' in payload.lower():
-        return True
-    
-    # For script tag breakouts, check if </script> appears before alert/XSS code
+    payload_lower = payload.lower()
+
+    # Script-tag breakout: payload must close the script AND introduce new executable content
+    if '</script' in payload_lower:
+        # Ensure it is not just echoed inside a string or comment
+        # Verify the closing tag is unencoded AND is followed by exploitable content
+        if re.search(r'</script\s*>[^<]*<', html, re.IGNORECASE):
+            return True
+        return False
+
     if 'script' in context_type or context_type == 'script_tag':
-        if '</script>' in payload.lower() or '</script' in payload.lower():
-            # Verify the script tag was actually closed and new content injected
+        if '</script' in payload_lower and re.search(r'</script\s*>', html, re.IGNORECASE):
             return True
-    
-    # For JavaScript string breakouts, check for quote escape
+
+    # JavaScript string breakouts: quote must NOT be backslash-escaped in the response
     if 'js_string' in context_type:
-        if ("'" in payload or '"' in payload) and ('alert' in payload or 'script' in payload.lower() or 'fetch' in payload.lower()):
-            return True
-    
-    # For template literal breakouts
+        # Check single-quote breakout
+        if "'" in payload and not re.search(r"\\'", html):
+            if any(t in payload_lower for t in ['alert(', 'confirm(', 'prompt(', 'fetch(', '<script']):
+                return True
+        # Check double-quote breakout
+        if '"' in payload and not re.search(r'\\"', html):
+            if any(t in payload_lower for t in ['alert(', 'confirm(', 'prompt(', 'fetch(', '<script']):
+                return True
+
+    # Template literal breakout: backtick or ${...} must be unescaped
     if context_type == 'js_template_literal':
-        if '${' in payload or '`' in payload:
+        if ('${' in payload or '`' in payload) and not re.search(r'\\`', html):
             return True
-    
-    # For JSON context breakouts
+
+    # JSON value breakout: escape sequences must close the string
     if context_type == 'json_value':
-        if '\\' in payload and ('script' in payload.lower() or 'img' in payload.lower()):
+        if re.search(r'["\'].*</?(script|img|svg)', payload_lower):
             return True
-    
-    # For attribute breakouts, check for quote and tag closure
+
+    # Attribute breakout: must close attribute AND tag, then introduce event handler or script
     if 'attribute' in context_type:
-        if ('">' in payload or "'" in payload) and ('on' in payload or 'script' in payload.lower()):
+        has_tag_close = '">' in payload or "'>" in payload or '/>' in payload
+        has_exploit = any(t in payload_lower for t in ['onerror', 'onload', 'onclick', 'onfocus', 'onmouseover', '<script'])
+        if has_tag_close and has_exploit:
             return True
-    
+
     return False
 
 
