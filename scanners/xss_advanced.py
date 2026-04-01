@@ -1063,7 +1063,7 @@ class SeverityScorer:
         return severity, score, reasoning
 
 
-def advanced_xss_scan(url: str, 
+def advanced_xss_scan(url: str,
                       mode: str = 'advanced',
                       custom_payloads_file: Optional[str] = None,
                       callback_url: Optional[str] = None,
@@ -1077,7 +1077,8 @@ def advanced_xss_scan(url: str,
                       fallback_params: Optional[List[str]] = None,
                       max_payloads_per_param: int = 20,
                       enable_stored_workflow: bool = True,
-                      browser_verify: bool = False) -> List[Dict]:
+                      browser_verify: bool = False,
+                      seed_urls: Optional[List[str]] = None) -> List[Dict]:
     """
     Advanced XSS scanning with context detection and exploitation proofs
     
@@ -1146,13 +1147,23 @@ def advanced_xss_scan(url: str,
                 try:
                     crawl_max_pages = 20 if not has_post_form else 10
                     crawl_max_depth = 2 if not has_post_form else 1
-                    pages = _crawl_in_scope_pages(
-                        url,
-                        max_pages=crawl_max_pages,
-                        max_depth=crawl_max_depth,
-                        timeout=timeout,
-                        headers=headers,
-                    )
+                    # Crawl from the main URL first, then from any injected seed URLs
+                    # (e.g. parameterised search/booking flows the root page doesn't link to)
+                    crawl_start_urls = [url] + [s for s in (seed_urls or []) if s != url]
+                    pages = []
+                    budget = crawl_max_pages
+                    for start in crawl_start_urls:
+                        if budget <= 0:
+                            break
+                        chunk = _crawl_in_scope_pages(
+                            start,
+                            max_pages=budget,
+                            max_depth=crawl_max_depth,
+                            timeout=timeout,
+                            headers=headers,
+                        )
+                        pages.extend(chunk)
+                        budget -= len(chunk)
                     stored_pages.extend(pages)
                     if not has_post_form:
                         for page_url, page_html in pages:
@@ -1199,7 +1210,20 @@ def advanced_xss_scan(url: str,
                 log(f"Harvested {len(filtered_harvested)} parameter(s) from HTML/JS: {', '.join(filtered_harvested)}", 'INFO')
                 for param in filtered_harvested:
                     params.setdefault(param, ['test'])
-            
+
+            # Pull query parameters directly from seed URLs — these are real params
+            # from known interesting endpoints (e.g. search/booking flows) that the
+            # root page may not expose.
+            for seed in (seed_urls or []):
+                try:
+                    seed_parsed = urllib.parse.urlparse(seed)
+                    for k, v in urllib.parse.parse_qs(seed_parsed.query).items():
+                        if k not in params:
+                            params[k] = v
+                            log(f"Seed URL contributed parameter: {k}", 'INFO')
+                except Exception:
+                    pass
+
             # Collect parameter names from GET forms
             form_get_params = set()
             form_post_params = set()
@@ -1355,15 +1379,19 @@ def advanced_xss_scan(url: str,
 
                 debug_attempts_logged = 0
                 adaptive_used = False
-                
-                for payload in context_payloads[:max_payloads_per_param]:  # Limit to prevent excessive requests
+                from scanners.http_utils import request_with_backoff, PersistentRateLimitError
+                _429_counter = [0]  # shared mutable counter for circuit breaker
+
+                try:
+                 for payload in context_payloads[:max_payloads_per_param]:  # Limit to prevent excessive requests
                     attempted_payloads += 1
                     test_params = _copy_baseline_params()
                     test_params[param_name] = [payload]
                     flat_params = {k: v[0] if isinstance(v, list) else v for k, v in test_params.items()}
-                    
+
                     try:
-                        response = client.get(base_url, params=flat_params)
+                        response = request_with_backoff(client, 'GET', base_url, params=flat_params,
+                                                        _consecutive_429_counter=_429_counter)
 
                         reflected = payload in response.text
                         vuln_ok = reflected and is_xss_vulnerable(response.text, payload, expected_context=context)
@@ -1457,7 +1485,8 @@ def advanced_xss_scan(url: str,
                                     test_params_variant[param_name] = [variant]
                                     flat_variant = {k: v[0] if isinstance(v, list) else v for k, v in test_params_variant.items()}
                                     try:
-                                        response_variant = client.get(base_url, params=flat_variant)
+                                        response_variant = request_with_backoff(client, 'GET', base_url, params=flat_variant,
+                                                                                _consecutive_429_counter=_429_counter)
                                         if variant in response_variant.text and is_xss_vulnerable(response_variant.text, variant, expected_context=observed_context):
                                             vuln_data = {
                                                 'type': 'reflected_xss',
@@ -1555,10 +1584,15 @@ def advanced_xss_scan(url: str,
                     except httpx.TimeoutException:
                         log(f"Timeout testing {param_name}", 'WARN')
                         break
+                    except PersistentRateLimitError:
+                        raise  # propagate to outer circuit-breaker handler
                     except Exception as e:
                         log(f"Error testing {param_name}: {str(e)[:100]}", 'DEBUG')
                         continue
-            
+                except PersistentRateLimitError as e:
+                    log(f"Rate limit circuit breaker triggered for {param_name} — skipping target: {e}", 'WARN')
+                    break  # stop testing remaining params on this target
+
             # Test forms
             if forms:
                 log(f"Found {len(forms)} form(s) to test", 'INFO')
@@ -1626,12 +1660,13 @@ def advanced_xss_scan(url: str,
                             form_data = {}
                             for inp in form['inputs']:
                                 form_data[inp['name']] = payload if inp['name'] == field_name else (inp['value'] or 'test')
-                            
+
                             try:
+                                from scanners.http_utils import request_with_backoff
                                 if form['method'] == 'POST':
-                                    response = client.post(form_url, data=form_data)
+                                    response = request_with_backoff(client, 'POST', form_url, data=form_data)
                                 else:
-                                    response = client.get(form_url, params=form_data)
+                                    response = request_with_backoff(client, 'GET', form_url, params=form_data)
                                 
                                 if payload in response.text and is_xss_vulnerable(response.text, payload):
                                     # Similar vulnerability recording as GET parameters
@@ -1955,6 +1990,23 @@ def _is_reflected_unescaped(response_text: str, payload: str) -> bool:
     return payload in response_text
 
 
+def _is_in_href_like_attr(text: str, payload: str) -> bool:
+    """Return True if the payload appears inside an href/src/action attribute value.
+
+    javascript: URIs are only executable in these attribute contexts — not in value="",
+    title tags, text nodes, meta content, etc.
+    """
+    import re as _re
+    idx = text.find(payload)
+    if idx == -1:
+        return False
+    prefix = text[max(0, idx - 200):idx]
+    return bool(_re.search(
+        r'(?:href|src|action|formaction|xlink:href|data)\s*=\s*["\']?\s*$',
+        prefix, _re.IGNORECASE
+    ))
+
+
 def is_xss_vulnerable(response_text: str, payload: str, expected_context: Optional[str] = None) -> bool:
     """
     Conservative vulnerability detection to reduce false positives.
@@ -1987,11 +2039,19 @@ def is_xss_vulnerable(response_text: str, payload: str, expected_context: Option
             return False
 
     payload_lower = payload.lower()
-    if any(keyword in payload_lower for keyword in ['<script', '</script', 'onerror', 'onload', 'onmouseover', 'onclick', 'javascript:']):
+
+    # javascript: URI — only dangerous in href/src/action attributes, NOT in value="",
+    # <title>, text nodes, or meta attributes. Check specifically before the generic path.
+    if 'javascript:' in payload_lower and not any(
+        k in payload_lower for k in ['<script', '</script', 'onerror', 'onload', 'onmouseover', 'onclick', '<img', '<svg', '<iframe']
+    ):
+        return actual_context == 'javascript' or _is_in_href_like_attr(response_text, payload)
+
+    if any(keyword in payload_lower for keyword in ['<script', '</script', 'onerror', 'onload', 'onmouseover', 'onclick']):
         return True
     if actual_context == 'javascript' and any(token in payload_lower for token in ['alert(', 'confirm(', 'prompt(', 'fetch(', 'document.']):
         return True
-    if actual_context == 'attribute' and any(token in payload_lower for token in ['onerror', 'onload', 'onmouseover', 'onclick', 'javascript:']):
+    if actual_context == 'attribute' and any(token in payload_lower for token in ['onerror', 'onload', 'onmouseover', 'onclick']):
         return True
     if actual_context == 'html' and any(tag in payload_lower for tag in ['<img', '<svg', '<iframe', '<script', '</script']):
         return True
